@@ -1,0 +1,24 @@
+{
+  "name": "fetch-customers-ids",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "fetch:customer-ids-from-emails": "node fetch-customer-ids-from-emails.js",
+    "fetch:campaign-ids-from-customers": "node fetch-campaign-ids-from-customers.js",
+
+    "migrate:single-campaign-to-sql-v3": "node migrate-single-campaign-mongo-to-sql-v3.js",
+    "migrate:single-campaign-to-sql-v3:dry-run": "node migrate-single-campaign-mongo-to-sql-v3.js --dry-run",
+
+    "migrate:campaigns-bulk-from-csv": "node migrate-campaigns-bulk-from-csv.js",
+    "migrate:campaigns-bulk-from-csv:dry-run": "node migrate-campaigns-bulk-from-csv.js --dry-run",
+    "migrate:campaigns-bulk-from-csv:limit5": "node migrate-campaigns-bulk-from-csv.js --limit 5",
+    "migrate:campaigns-bulk-from-csv:dry-run:limit5": "node migrate-campaigns-bulk-from-csv.js --dry-run --limit 5",
+    "migrate:campaigns-bulk-from-csv:stop-on-error": "node migrate-campaigns-bulk-from-csv.js --stop-on-error",
+    "migrate:campaigns-bulk-from-csv:dry-run:stop-on-error": "node migrate-campaigns-bulk-from-csv.js --dry-run --stop-on-error"
+  },
+  "dependencies": {
+    "mongodb": "^6.17.0",
+    "mssql": "^11.0.1"
+  }
+}
