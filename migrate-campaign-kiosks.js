@@ -24,7 +24,8 @@
  *   - Pricing fields (ContractPrice, EvergreenPrice) mapped from mongo booking if available,
  *     otherwise defaults to 0 (checks: contract_price, price, evergreen_price, monthly_price)
  *   - KioskAdPlacementID default = 1 (adjust if needed)
- *   - System user ID = 1 for Created/Updated user fields
+ *   - CampaignKiosks.CreatedUserID = NULL (nullable; no FK to Users)
+ *   - Venues/Kiosks create paths may still use DEFAULT_SYSTEM_USER_ID where NOT NULL
  *   - Deduplication: Venues by ImportVenueID, Kiosks by ImportKioskID
  */
 import mongodb from "mongodb";
@@ -47,10 +48,27 @@ const SQL_KIOSKS_TABLE = "Kiosks";
 const SQL_VENUES_TABLE = "Venues";
 
 // Default values for required NOT NULL fields
-const DEFAULT_SYSTEM_USER_ID = 1; // System user for Created/Updated fields
+const DEFAULT_SYSTEM_USER_ID = null; // System user for Created/Updated fields
 const DEFAULT_KIOSK_AD_PLACEMENT_ID = 1; // Adjust based on your SQL data
 const DEFAULT_CONTRACT_PRICE = 0; // Placeholder (skip pricing per user request)
 const DEFAULT_EVERGREEN_PRICE = 0; // Placeholder
+
+/** Format mssql / generic errors for logs and CSV. */
+function formatMigrationError(err) {
+  if (!err) return "Unknown error";
+  if (typeof err === "string") return err;
+  const parts = [err.message || String(err)];
+  if (err.number != null) parts.push(`SQL ${err.number}`);
+  if (err.state != null) parts.push(`state ${err.state}`);
+  if (err.class != null) parts.push(`class ${err.class}`);
+  if (err.procName) parts.push(`proc ${err.procName}`);
+  if (err.lineNumber != null) parts.push(`line ${err.lineNumber}`);
+  return parts.join(" | ");
+}
+
+function bookingRef(booking) {
+  return booking?._id ? String(booking._id) : "(unknown booking)";
+}
 
 // =============================================================================
 // MONGO QUERIES
@@ -279,7 +297,7 @@ function mapBookingToCampaignKiosk(booking, sqlCampaignId, sqlKioskId) {
     EvergreenPrice: evergreenPrice,
     KioskAdPlacementID: DEFAULT_KIOSK_AD_PLACEMENT_ID,
     CreatedDate: toDate(booking.created) || new Date(),
-    CreatedUserID: DEFAULT_SYSTEM_USER_ID,
+    CreatedUserID: null, // nullable FK to Users — do not use placeholder ID
   };
 }
 
@@ -365,7 +383,7 @@ async function insertCampaignKioskRow(pool, row) {
   request.input("evergreenPrice", sql.Money, row.EvergreenPrice);
   request.input("kioskAdPlacementID", sql.Int, row.KioskAdPlacementID);
   request.input("createdDate", sql.DateTime, row.CreatedDate);
-  request.input("createdUserID", sql.Int, row.CreatedUserID);
+  request.input("createdUserID", sql.Int, row.CreatedUserID ?? null);
 
   await request.query(`
     INSERT INTO ${SQL_CAMPAIGN_KIOSKS_TABLE} (
@@ -424,24 +442,30 @@ export async function migrateCampaignKiosks(pool, mongoCampaignIdHex, sqlCampaig
 
       const displayObjectId = booking.display ? String(booking.display) : null;
       if (!displayObjectId) {
-        stats.errors.push(`Booking ${booking._id} has no display`);
+        stats.errors.push(`[booking ${bookingRef(booking)}] has no display field`);
         continue;
       }
 
       // 3. Load display → get kiosk string + venue ObjectId
       const display = await fetchMongoDisplay(displayObjectId);
       if (!display.doc) {
-        stats.errors.push(`Display ${displayObjectId} not found in Mongo`);
+        stats.errors.push(
+          `[booking ${bookingRef(booking)}] display ${displayObjectId} not found in Mongo (${MONGO_DISPLAYS_COLLECTION})`
+        );
         continue;
       }
 
       if (!display.kiosk) {
-        stats.errors.push(`Display ${displayObjectId} has no kiosk field`);
+        stats.errors.push(
+          `[booking ${bookingRef(booking)}] display ${displayObjectId} has no kiosk field (import_display_id=${display.doc.import_display_id ?? "n/a"})`
+        );
         continue;
       }
 
       if (!display.venueObjectId) {
-        stats.errors.push(`Display ${displayObjectId} has no venue field`);
+        stats.errors.push(
+          `[booking ${bookingRef(booking)}] display ${displayObjectId} has no venue field (kiosk=${display.kiosk})`
+        );
         continue;
       }
 
@@ -463,7 +487,9 @@ export async function migrateCampaignKiosks(pool, mongoCampaignIdHex, sqlCampaig
         // 5. Load venue from Mongo
         const mongoVenue = await fetchMongoVenue(display.venueObjectId);
         if (!mongoVenue) {
-          stats.errors.push(`Venue ${display.venueObjectId} not found in Mongo for kiosk ${display.kiosk}`);
+          stats.errors.push(
+            `[booking ${bookingRef(booking)}] venue ${display.venueObjectId} not found in Mongo (${MONGO_VENUES_COLLECTION}) for kiosk ${display.kiosk}`
+          );
           continue;
         }
 
@@ -519,20 +545,30 @@ export async function migrateCampaignKiosks(pool, mongoCampaignIdHex, sqlCampaig
       if (dryRun) {
         stats.campaignKiosksCreated++;
         if (verbose) {
-          console.log(`    [DRY RUN] Would link CampaignKiosk: Campaign ${sqlCampaignId} ↔ Kiosk ${sqlKiosk.id}`);
+          console.log(
+            `    [DRY RUN] Would link CampaignKiosk: Campaign ${sqlCampaignId} ↔ Kiosk ${sqlKiosk.id} (ImportKioskID ${display.kiosk})`
+          );
         }
       } else {
-        const campaignKioskRow = mapBookingToCampaignKiosk(booking, sqlCampaignId, sqlKiosk.id);
-        await insertCampaignKioskRow(pool, campaignKioskRow);
-        stats.campaignKiosksCreated++;
-        if (verbose) {
-          console.log(`    Linked CampaignKiosk: Campaign ${sqlCampaignId} ↔ Kiosk ${sqlKiosk.id}`);
+        try {
+          const campaignKioskRow = mapBookingToCampaignKiosk(booking, sqlCampaignId, sqlKiosk.id);
+          await insertCampaignKioskRow(pool, campaignKioskRow);
+          stats.campaignKiosksCreated++;
+          if (verbose) {
+            console.log(
+              `    Linked CampaignKiosk: Campaign ${sqlCampaignId} ↔ Kiosk ${sqlKiosk.id} (ImportKioskID ${display.kiosk})`
+            );
+          }
+        } catch (insertErr) {
+          stats.errors.push(
+            `[booking ${bookingRef(booking)}] CampaignKiosks INSERT failed: CampaignID=${sqlCampaignId}, KioskID=${sqlKiosk.id}, ImportKioskID=${display.kiosk} — ${formatMigrationError(insertErr)}`
+          );
         }
       }
     }
   } catch (error) {
     stats.ok = false;
-    stats.errors.push(error.message);
+    stats.errors.push(`Kiosk migration fatal: ${formatMigrationError(error)}`);
   }
 
   return stats;

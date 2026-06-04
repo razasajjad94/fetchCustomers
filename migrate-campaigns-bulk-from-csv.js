@@ -95,6 +95,33 @@ function formatSqlTarget(connectionString) {
   return `${database} @ ${server}`;
 }
 
+/** Print kiosk step summary and every warning/error for one campaign. */
+function logKioskIssues(logPrefix, mongoCampaignId, sqlCampaignId, kioskStats) {
+  if (!kioskStats) return;
+
+  const bookings = kioskStats.bookingsProcessed ?? 0;
+  const linked = kioskStats.campaignKiosksCreated ?? 0;
+  const errs = kioskStats.errors ?? [];
+
+  if (bookings === 0 && errs.length === 0) {
+    console.log(`${logPrefix}  [kiosks] no bookings in Mongo for this campaign`);
+    return;
+  }
+
+  console.log(
+    `${logPrefix}  [kiosks] bookings=${bookings} linked=${linked} created=${kioskStats.kiosksCreated ?? 0} reused=${kioskStats.kiosksReused ?? 0} venues+${kioskStats.venuesCreated ?? 0} venues↺${kioskStats.venuesReused ?? 0}`
+  );
+
+  if (errs.length === 0) return;
+
+  console.warn(
+    `${logPrefix}  [kiosks] ${errs.length} warning(s) — campaign ${mongoCampaignId}${sqlCampaignId != null && sqlCampaignId > 0 ? ` → SQL Campaign.ID ${sqlCampaignId}` : ""}:`
+  );
+  for (let i = 0; i < errs.length; i++) {
+    console.warn(`${logPrefix}    ${i + 1}. ${errs[i]}`);
+  }
+}
+
 // =============================================================================
 // Output CSV — one line per campaign after migrateOneCampaign() returns
 // =============================================================================
@@ -127,6 +154,7 @@ function formatBulkResultLine(result) {
     k.venuesCreated ?? "",
     k.venuesReused ?? "",
     k.errors?.length ?? "",
+    (k.errors && k.errors.length ? k.errors.join(" || ") : ""),
     result.error ?? s.error ?? "",
   ]
     .map(escapeCsvCell)
@@ -161,6 +189,7 @@ function aggregateBulkStats(results, dryRun) {
     venuesCreated: 0,
     venuesReused: 0,
     kioskErrors: 0,
+    kioskWarnings: [],
     campaignLinks: [],
     failures: [],
   };
@@ -215,6 +244,13 @@ function aggregateBulkStats(results, dryRun) {
       stats.venuesReused += k.venuesReused || 0;
       if (k.errors && k.errors.length > 0) {
         stats.kioskErrors += k.errors.length;
+        stats.kioskWarnings.push({
+          mongo: s.mongoCampaignId,
+          sqlCampaignId: s.insertedCampaignId,
+          bookingsProcessed: k.bookingsProcessed ?? 0,
+          campaignKiosksCreated: k.campaignKiosksCreated ?? 0,
+          errors: [...k.errors],
+        });
       }
     }
 
@@ -267,7 +303,7 @@ function printBulkStatsReport(stats, dryRun, outputPath) {
   console.log(`  Venues created:           ${stats.venuesCreated}`);
   console.log(`  Venues reused:            ${stats.venuesReused}`);
   if (stats.kioskErrors > 0) {
-    console.log(`  Kiosk warnings/errors:    ${stats.kioskErrors}`);
+    console.log(`  Kiosk warnings/errors:    ${stats.kioskErrors} (see [Kiosk warnings] below)`);
   }
 
   const totalSqlWrites =
@@ -297,9 +333,23 @@ function printBulkStatsReport(stats, dryRun, outputPath) {
   }
 
   if (stats.failures.length) {
-    console.log("\n[Failures]");
+    console.log("\n[Failures — campaign migration]");
     for (const f of stats.failures) {
       console.log(`  ${f.mongo}: ${f.error}`);
+    }
+  }
+
+  if (stats.kioskWarnings?.length) {
+    console.log("\n[Kiosk warnings — campaign ok, kiosk step had issues]");
+    for (const w of stats.kioskWarnings) {
+      const cid =
+        w.sqlCampaignId != null && w.sqlCampaignId > 0 ? `SQL Campaign.ID ${w.sqlCampaignId}` : "no SQL ID";
+      console.log(
+        `  ${w.mongo} (${cid}) — bookings ${w.bookingsProcessed}, linked ${w.campaignKiosksCreated}, ${w.errors.length} issue(s):`
+      );
+      for (let i = 0; i < w.errors.length; i++) {
+        console.log(`      ${i + 1}. ${w.errors[i]}`);
+      }
     }
   }
 
@@ -394,12 +444,26 @@ async function main() {
             { dryRun, verbose: false }
           );
           }
-          if (kioskStats.errors.length > 0) {
-            console.log(`${prefix}  → kiosk warnings: ${kioskStats.errors.length}`);
-          }
+          logKioskIssues(
+            prefix,
+            mongoCampaignId,
+            sqlCampaignIdForKiosks,
+            kioskStats
+          );
         } catch (err) {
-          console.error(`${prefix}  → kiosk migration error: ${err.message}`);
-          kioskStats = { ok: false, errors: [err.message] };
+          const msg = err.message || String(err);
+          console.error(`${prefix}  [kiosks] fatal error: ${msg}`);
+          if (err.stack) console.error(err.stack);
+          kioskStats = {
+            ok: false,
+            bookingsProcessed: 0,
+            campaignKiosksCreated: 0,
+            kiosksCreated: 0,
+            kiosksReused: 0,
+            venuesCreated: 0,
+            venuesReused: 0,
+            errors: [`Kiosk migration fatal: ${msg}`],
+          };
         }
       }
 
@@ -448,7 +512,8 @@ async function main() {
       "kiosks_reused",
       "venues_created",
       "venues_reused",
-      "kiosk_errors",
+      "kiosk_error_count",
+      "kiosk_error_messages",
       "error",
     ].join(",");
 
