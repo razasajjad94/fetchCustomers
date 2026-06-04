@@ -249,7 +249,7 @@ function mapMongoVenueToSql(mongoDoc) {
     CreatedDate: created,
     CreateUserID: DEFAULT_VENUE_CREATE_USER_ID,
     PermanentlyClosed: 0,
-    Sellable: mongoDoc.sellable === "yes" || mongoDoc.sellable === true ? 1 : 0,
+    Sellable: 0,
   };
 }
 
@@ -261,7 +261,7 @@ function mapMongoKioskToSql(kioskString, venueId) {
     ImportKioskID: truncate(kioskString, 50),
     VenueID: venueId,
     IsDigital: 0, // Default; adjust if mongo has digital flag
-    Sellable: 1, // Default
+    Sellable: 0, // Default
     Retired: 1, // New migrated kiosks: always Retired = true
     CreatedDate: new Date(),
     CreatedUserID: null,
