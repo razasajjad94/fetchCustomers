@@ -24,7 +24,8 @@
  *   - Pricing fields (ContractPrice, EvergreenPrice) mapped from mongo booking if available,
  *     otherwise defaults to 0 (checks: contract_price, price, evergreen_price, monthly_price)
  *   - KioskAdPlacementID default = 1 (adjust if needed)
- *   - CampaignKiosks / Venues / Kiosks user FK columns = NULL (no placeholder Users.ID)
+ *   - Venues.CreateUserID = -1 (NOT NULL migration sentinel)
+ *   - Kiosks / CampaignKiosks CreatedUserID = NULL where nullable
  *   - Deduplication: Venues by ImportVenueID, Kiosks by ImportKioskID
  */
 import mongodb from "mongodb";
@@ -46,7 +47,9 @@ const SQL_CAMPAIGN_KIOSKS_TABLE = "CampaignKiosks";
 const SQL_KIOSKS_TABLE = "Kiosks";
 const SQL_VENUES_TABLE = "Venues";
 
-// User FK columns — always NULL on insert (avoids FK_CreatedUserID / FK_CreateUserID errors)
+/** Venues.CreateUserID is NOT NULL — migration sentinel (same as PaymentSchedule.CreatedUser) */
+const DEFAULT_VENUE_CREATE_USER_ID = -1;
+
 const DEFAULT_KIOSK_AD_PLACEMENT_ID = 1; // Adjust based on your SQL data
 const DEFAULT_CONTRACT_PRICE = 0; // Placeholder (skip pricing per user request)
 const DEFAULT_EVERGREEN_PRICE = 0; // Placeholder
@@ -244,7 +247,7 @@ function mapMongoVenueToSql(mongoDoc) {
     Retired: mongoDoc.retired === true ? 1 : 0,
     ImportVenueID: importVenueId ? parseInt(importVenueId, 10) : null,
     CreatedDate: created,
-    CreateUserID: null,
+    CreateUserID: DEFAULT_VENUE_CREATE_USER_ID,
     PermanentlyClosed: 0,
     Sellable: mongoDoc.sellable === "yes" || mongoDoc.sellable === true ? 1 : 0,
   };
@@ -321,7 +324,11 @@ async function insertVenueRow(pool, row) {
   request.input("retired", sql.Bit, row.Retired);
   request.input("importVenueID", sql.Int, row.ImportVenueID);
   request.input("createdDate", sql.DateTime, row.CreatedDate);
-  request.input("createUserID", sql.Int, row.CreateUserID ?? null);
+  request.input(
+    "createUserID",
+    sql.Int,
+    row.CreateUserID ?? DEFAULT_VENUE_CREATE_USER_ID
+  );
   request.input("permanentlyClosed", sql.Bit, row.PermanentlyClosed);
   request.input("sellable", sql.Bit, row.Sellable);
 
