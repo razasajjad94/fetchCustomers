@@ -1,6 +1,6 @@
-mongo_campaign_id,status,sql_campaign_id,order_number,status_id,sales_rep_user_id,customer_login_id,campaign_inserted,customer_campaign_inserted,user_inserted,customer_account_inserted,customer_login_inserted,customer_campaign_already_exists,bookings_processed,campaign_kiosks_created,kiosks_created,kiosks_reused,venues_created,venues_reused,kiosk_error_count,kiosk_error_messages,error
-5570c2ca7257f90b0028a525,ok,54579,15064579,11,1939,42695,1,1,0,1,1,0,1,1,0,1,0,0,0,,
-55689924cc44750b0004d0e6,ok,54580,15054580,11,1940,42696,1,1,0,1,1,0,2,2,0,2,0,0,0,,
-557603ee467e830b005b53a4,ok,54581,15064581,61,1939,42697,1,1,0,1,1,0,0,0,0,0,0,0,0,,
-558b140331a9dd0b0031b098,ok,54582,15064582,11,1939,42698,1,1,0,1,1,0,1,1,0,1,0,0,0,,
-55835766e0f36d0b001ca5b8,ok,54583,15064583,61,1939,42699,1,1,0,1,1,0,1,0,0,0,0,0,1,[booking 55835780e0f36d0b001ca5ba] display 555e28de54afb70b000572a3 not found in Mongo (displays),
+mongo_campaign_id,status,sql_campaign_id,order_number,status_id,sales_rep_user_id,customer_login_id,campaign_inserted,customer_campaign_inserted,user_inserted,customer_account_inserted,customer_login_inserted,customer_campaign_already_exists,bookings_processed,campaign_kiosks_created,kiosks_created,kiosks_reused,venues_created,venues_reused,kiosk_error_count,kiosk_error_messages,payment_schedules_processed,invoice_headers_created,payment_schedules_created,payment_error_count,payment_error_messages,error
+5570c2ca7257f90b0028a525,ok,60393,15060393,11,1939,47352,1,1,0,1,1,0,1,1,0,1,0,0,0,,0,0,0,0,,
+55689924cc44750b0004d0e6,ok,60394,15050394,11,1940,47353,1,1,0,1,1,0,2,2,0,2,0,0,0,,0,0,0,0,,
+557603ee467e830b005b53a4,ok,60395,15060395,61,1939,47354,1,1,0,1,1,0,0,0,0,0,0,0,0,,0,0,0,0,,
+558b140331a9dd0b0031b098,ok,60396,15060396,11,1939,47355,1,1,0,1,1,0,1,1,0,1,0,0,0,,0,0,0,0,,
+55835766e0f36d0b001ca5b8,ok,60397,15060397,61,1939,47356,1,1,0,1,1,0,1,0,0,0,0,0,1,[booking 55835780e0f36d0b001ca5ba] display 555e28de54afb70b000572a3 not found in Mongo (displays),0,0,0,0,,

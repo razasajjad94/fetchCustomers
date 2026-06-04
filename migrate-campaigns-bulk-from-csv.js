@@ -46,6 +46,7 @@ import {
   migrateOneCampaign,
 } from "./migrate-single-campaign-mongo-to-sql-v3.js";
 import { migrateCampaignKiosks } from "./migrate-campaign-kiosks.js";
+import { migrateCampaignPaymentSchedules } from "./migrate-campaign-payment-schedules.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -122,6 +123,32 @@ function logKioskIssues(logPrefix, mongoCampaignId, sqlCampaignId, kioskStats) {
   }
 }
 
+/** Print payment schedule step summary and warnings. */
+function logPaymentIssues(logPrefix, mongoCampaignId, sqlCampaignId, paymentStats) {
+  if (!paymentStats) return;
+
+  const n = paymentStats.schedulesProcessed ?? 0;
+  const errs = paymentStats.errors ?? [];
+
+  if (n === 0 && errs.length === 0) {
+    console.log(`${logPrefix}  [payments] no payment_schedules in Mongo for this campaign`);
+    return;
+  }
+
+  console.log(
+    `${logPrefix}  [payments] schedules=${n} invoiceHeaders=${paymentStats.invoiceHeadersCreated ?? 0} paymentSchedules=${paymentStats.paymentSchedulesCreated ?? 0}`
+  );
+
+  if (errs.length === 0) return;
+
+  console.warn(
+    `${logPrefix}  [payments] ${errs.length} warning(s) — campaign ${mongoCampaignId}${sqlCampaignId != null && sqlCampaignId > 0 ? ` → SQL Campaign.ID ${sqlCampaignId}` : ""}:`
+  );
+  for (let i = 0; i < errs.length; i++) {
+    console.warn(`${logPrefix}    ${i + 1}. ${errs[i]}`);
+  }
+}
+
 // =============================================================================
 // Output CSV — one line per campaign after migrateOneCampaign() returns
 // =============================================================================
@@ -133,6 +160,7 @@ function logKioskIssues(logPrefix, mongoCampaignId, sqlCampaignId, kioskStats) {
 function formatBulkResultLine(result) {
   const s = result.summary;
   const k = result.kioskStats || {};
+  const p = result.paymentStats || {};
   return [
     s.mongoCampaignId,
     result.ok ? "ok" : "error",
@@ -155,6 +183,11 @@ function formatBulkResultLine(result) {
     k.venuesReused ?? "",
     k.errors?.length ?? "",
     (k.errors && k.errors.length ? k.errors.join(" || ") : ""),
+    p.schedulesProcessed ?? "",
+    p.invoiceHeadersCreated ?? "",
+    p.paymentSchedulesCreated ?? "",
+    p.errors?.length ?? "",
+    (p.errors && p.errors.length ? p.errors.join(" || ") : ""),
     result.error ?? s.error ?? "",
   ]
     .map(escapeCsvCell)
@@ -190,6 +223,11 @@ function aggregateBulkStats(results, dryRun) {
     venuesReused: 0,
     kioskErrors: 0,
     kioskWarnings: [],
+    schedulesProcessed: 0,
+    invoiceHeadersCreated: 0,
+    paymentSchedulesCreated: 0,
+    paymentErrors: 0,
+    paymentWarnings: [],
     campaignLinks: [],
     failures: [],
   };
@@ -197,6 +235,7 @@ function aggregateBulkStats(results, dryRun) {
   for (const result of results) {
     const s = result.summary;
     const k = result.kioskStats;
+    const p = result.paymentStats;
 
     if (!result.ok) {
       stats.failed++;
@@ -254,6 +293,23 @@ function aggregateBulkStats(results, dryRun) {
       }
     }
 
+    if (p) {
+      stats.schedulesProcessed += p.schedulesProcessed || 0;
+      stats.invoiceHeadersCreated += p.invoiceHeadersCreated || 0;
+      stats.paymentSchedulesCreated += p.paymentSchedulesCreated || 0;
+      if (p.errors?.length > 0) {
+        stats.paymentErrors += p.errors.length;
+        stats.paymentWarnings.push({
+          mongo: s.mongoCampaignId,
+          sqlCampaignId: s.insertedCampaignId,
+          schedulesProcessed: p.schedulesProcessed ?? 0,
+          invoiceHeadersCreated: p.invoiceHeadersCreated ?? 0,
+          paymentSchedulesCreated: p.paymentSchedulesCreated ?? 0,
+          errors: [...p.errors],
+        });
+      }
+    }
+
     stats.campaignLinks.push({
       mongo: s.mongoCampaignId,
       sqlCampaignId: s.insertedCampaignId,
@@ -306,6 +362,14 @@ function printBulkStatsReport(stats, dryRun, outputPath) {
     console.log(`  Kiosk warnings/errors:    ${stats.kioskErrors} (see [Kiosk warnings] below)`);
   }
 
+  console.log(`\n[Payment schedules]`);
+  console.log(`  Mongo schedules processed:  ${stats.schedulesProcessed}`);
+  console.log(`  InvoiceHeader ${dryRun ? "would be" : ""} created:     ${stats.invoiceHeadersCreated}`);
+  console.log(`  PaymentSchedule ${dryRun ? "would be" : ""} created:   ${stats.paymentSchedulesCreated}`);
+  if (stats.paymentErrors > 0) {
+    console.log(`  Payment warnings/errors:  ${stats.paymentErrors} (see [Payment warnings] below)`);
+  }
+
   const totalSqlWrites =
     stats.campaignsInserted +
     stats.orderNumbersSet +
@@ -315,7 +379,9 @@ function printBulkStatsReport(stats, dryRun, outputPath) {
     stats.customerCampaignsInserted +
     stats.campaignKiosksCreated +
     stats.kiosksCreated +
-    stats.venuesCreated;
+    stats.venuesCreated +
+    stats.invoiceHeadersCreated +
+    stats.paymentSchedulesCreated;
 
   console.log(`\n[SQL write operations total]  +${dryRun ? 0 : totalSqlWrites} ${dryRun ? "(dry run)" : ""}`);
 
@@ -346,6 +412,20 @@ function printBulkStatsReport(stats, dryRun, outputPath) {
         w.sqlCampaignId != null && w.sqlCampaignId > 0 ? `SQL Campaign.ID ${w.sqlCampaignId}` : "no SQL ID";
       console.log(
         `  ${w.mongo} (${cid}) — bookings ${w.bookingsProcessed}, linked ${w.campaignKiosksCreated}, ${w.errors.length} issue(s):`
+      );
+      for (let i = 0; i < w.errors.length; i++) {
+        console.log(`      ${i + 1}. ${w.errors[i]}`);
+      }
+    }
+  }
+
+  if (stats.paymentWarnings?.length) {
+    console.log("\n[Payment warnings — campaign ok, payment step had issues]");
+    for (const w of stats.paymentWarnings) {
+      const cid =
+        w.sqlCampaignId != null && w.sqlCampaignId > 0 ? `SQL Campaign.ID ${w.sqlCampaignId}` : "no SQL ID";
+      console.log(
+        `  ${w.mongo} (${cid}) — schedules ${w.schedulesProcessed}, invoices ${w.invoiceHeadersCreated}, payment rows ${w.paymentSchedulesCreated}, ${w.errors.length} issue(s):`
       );
       for (let i = 0; i < w.errors.length; i++) {
         console.log(`      ${i + 1}. ${w.errors[i]}`);
@@ -468,18 +548,58 @@ async function main() {
       }
 
       result.kioskStats = kioskStats;
+
+      let paymentStats = null;
+      if (result.ok) {
+        const sqlCampaignIdForPayments =
+          result.summary.insertedCampaignId ?? (dryRun ? -1 : null);
+        try {
+          if (sqlCampaignIdForPayments == null) {
+            paymentStats = {
+              ok: false,
+              schedulesProcessed: 0,
+              invoiceHeadersCreated: 0,
+              paymentSchedulesCreated: 0,
+              errors: ["No SQL Campaign.ID — payment step skipped"],
+            };
+          } else {
+            paymentStats = await migrateCampaignPaymentSchedules(
+              ctx.pool,
+              mongoCampaignId,
+              sqlCampaignIdForPayments,
+              { dryRun, verbose: false }
+            );
+          }
+          logPaymentIssues(prefix, mongoCampaignId, sqlCampaignIdForPayments, paymentStats);
+        } catch (err) {
+          const msg = err.message || String(err);
+          console.error(`${prefix}  [payments] fatal error: ${msg}`);
+          paymentStats = {
+            ok: false,
+            schedulesProcessed: 0,
+            invoiceHeadersCreated: 0,
+            paymentSchedulesCreated: 0,
+            errors: [`Payment migration fatal: ${msg}`],
+          };
+        }
+      }
+
+      result.paymentStats = paymentStats;
       results.push(result);
 
       if (result.ok) {
         okCount++;
-        const kioskSummary = result.kioskStats 
+        const kioskSummary = result.kioskStats
           ? ` | Kiosks: ${result.kioskStats.campaignKiosksCreated} linked, ${result.kioskStats.kiosksCreated} created, ${result.kioskStats.venuesCreated} venues`
           : "";
+        const paymentSummary = result.paymentStats
+          ? ` | Payments: ${result.paymentStats.paymentSchedulesCreated} rows, ${result.paymentStats.invoiceHeadersCreated} invoices`
+          : "";
         if (dryRun) {
-          console.log(`${prefix}  → dry-run ok${kioskSummary}`);
+          console.log(`${prefix}  → dry-run ok${kioskSummary}${paymentSummary}`);
         } else {
           console.log(
-            `${prefix}  → ok Campaign.ID=${result.summary.insertedCampaignId ?? "n/a"} OrderNumber=${result.summary.orderNumber ?? "n/a"}${kioskSummary}`
+            `${prefix}  → ok Campaign.ID=${result.summary.insertedCampaignId ?? "n/a"} OrderNumber=${result.summary.orderNumber ?? "n/a"}${kioskSummary}${paymentSummary}`
           );
         }
       } else {
@@ -514,6 +634,11 @@ async function main() {
       "venues_reused",
       "kiosk_error_count",
       "kiosk_error_messages",
+      "payment_schedules_processed",
+      "invoice_headers_created",
+      "payment_schedules_created",
+      "payment_error_count",
+      "payment_error_messages",
       "error",
     ].join(",");
 
