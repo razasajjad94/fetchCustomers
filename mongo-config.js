@@ -3,7 +3,7 @@
 const MONGO_URI = "mongodb://localhost:27017";
 
 // Database name = the DB shown in Compass sidebar (not the connection name "MongoConnection")
-const MONGO_DB_NAME = "mydb";
+const MONGO_DB_NAME = "terraboost";
 
 // Used by fetch-customer-ids-from-emails.js (lookup customer _id by login_email)
 const MONGO_COLLECTION_NAME = "customers";
