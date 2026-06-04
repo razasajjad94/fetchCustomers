@@ -4,11 +4,11 @@
  * =============================================================================
  *
  * FLOW (after Campaign insert + kiosk step):
- *   1. Query mongo payment_schedules where campaign = <mongo_campaign_id>
+ *   1. Query mongo paymentschedules where campaign = <mongo_campaign_id>
  *   2. For each row: INSERT InvoiceHeader (CampaignID = SQL Campaign.ID)
  *   3. INSERT PaymentSchedule using values from the InvoiceHeader row just created
  *
- * Mongo collection: payment_schedules (edit MONGO_PAYMENT_SCHEDULES_COLLECTION if different)
+ * Mongo collection: paymentschedules (mydb)
  *
  * InvoiceHeader mapping:
  *   invoice_number     → InvoiceNumber
@@ -35,7 +35,7 @@ const { MongoClient, ObjectId } = mongodb;
 // CONFIG
 // =============================================================================
 
-const MONGO_PAYMENT_SCHEDULES_COLLECTION = "payment_schedules";
+const MONGO_PAYMENT_SCHEDULES_COLLECTION = "paymentschedules";
 
 const SQL_INVOICE_HEADER_TABLE = "InvoiceHeader";
 const SQL_PAYMENT_SCHEDULE_TABLE = "PaymentSchedule";

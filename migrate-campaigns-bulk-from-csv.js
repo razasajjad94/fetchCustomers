@@ -131,7 +131,7 @@ function logPaymentIssues(logPrefix, mongoCampaignId, sqlCampaignId, paymentStat
   const errs = paymentStats.errors ?? [];
 
   if (n === 0 && errs.length === 0) {
-    console.log(`${logPrefix}  [payments] no payment_schedules in Mongo for this campaign`);
+    console.log(`${logPrefix}  [payments] no paymentschedules in Mongo for this campaign`);
     return;
   }
 
