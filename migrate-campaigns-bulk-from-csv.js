@@ -9,7 +9,10 @@
  *   2. Open ONE SQL connection and load STATUSES once (shared for all rows)
  *   3. For each campaign id, call migrateOneCampaign() from migrate-single-campaign-mongo-to-sql-v3.js
  *      (same mapping/insert logic as single-campaign script — customer, sales rep, OrderNumber, etc.)
- *   4. Write migration_bulk_results.csv with ok/error per row
+ *   4. migrateCampaignBillingInfo() — mongo campaigns → CampaignBillingInfo
+ *   5. migrateCampaignKiosks() — bookings / displays / venues / kiosks
+ *   6. migrateCampaignPaymentSchedules() — paymentschedules → InvoiceHeader + PaymentSchedule
+ *   7. Write migration_bulk_results.csv with ok/error per row
  *
  * WHAT THIS FILE DOES NOT CONTAIN:
  *   Field mapping, SQL INSERTs, and deduplication rules are all in:
@@ -45,6 +48,7 @@ import {
   createMigrationContext,
   migrateOneCampaign,
 } from "./migrate-single-campaign-mongo-to-sql-v3.js";
+import { migrateCampaignBillingInfo } from "./migrate-campaign-billing-info.js";
 import { migrateCampaignKiosks } from "./migrate-campaign-kiosks.js";
 import { migrateCampaignPaymentSchedules } from "./migrate-campaign-payment-schedules.js";
 
@@ -94,6 +98,34 @@ function formatSqlTarget(connectionString) {
   const database = connectionString.match(/Database=([^;]+)/i)?.[1] ?? "(unknown)";
   const server = connectionString.match(/Server=([^;]+)/i)?.[1] ?? "(unknown)";
   return `${database} @ ${server}`;
+}
+
+/** Print billing step summary and warnings. */
+function logBillingIssues(logPrefix, mongoCampaignId, sqlCampaignId, billingStats) {
+  if (!billingStats) return;
+
+  const errs = billingStats.errors ?? [];
+
+  if (billingStats.billingInfoCreated) {
+    const p = billingStats.preview;
+    const detail = p
+      ? ` Total=${p.Total} Monthly=${p.MonthlyPaymentAmount} Down=${p.DownPaymentAmount}`
+      : "";
+    console.log(
+      `${logPrefix}  [billing] CampaignBillingInfo ${billingStats.billingInfoCreated ? "ok" : "—"}${detail}`
+    );
+  } else if (errs.length === 0) {
+    console.log(`${logPrefix}  [billing] no CampaignBillingInfo row created`);
+  }
+
+  if (errs.length === 0) return;
+
+  console.warn(
+    `${logPrefix}  [billing] ${errs.length} warning(s) — campaign ${mongoCampaignId}${sqlCampaignId != null && sqlCampaignId > 0 ? ` → SQL Campaign.ID ${sqlCampaignId}` : ""}:`
+  );
+  for (let i = 0; i < errs.length; i++) {
+    console.warn(`      ${i + 1}. ${errs[i]}`);
+  }
 }
 
 /** Print kiosk step summary and every warning/error for one campaign. */
@@ -159,6 +191,7 @@ function logPaymentIssues(logPrefix, mongoCampaignId, sqlCampaignId, paymentStat
  */
 function formatBulkResultLine(result) {
   const s = result.summary;
+  const b = result.billingStats || {};
   const k = result.kioskStats || {};
   const p = result.paymentStats || {};
   return [
@@ -175,6 +208,9 @@ function formatBulkResultLine(result) {
     s.customerAccountInserted ? "1" : "0",
     s.customerLoginInserted ? "1" : "0",
     s.customerCampaignAlreadyExists ? "1" : "0",
+    b.billingInfoCreated ?? "",
+    b.errors?.length ?? "",
+    (b.errors && b.errors.length ? b.errors.join(" || ") : ""),
     k.bookingsProcessed ?? "",
     k.campaignKiosksCreated ?? "",
     k.kiosksCreated ?? "",
@@ -223,6 +259,9 @@ function aggregateBulkStats(results, dryRun) {
     venuesReused: 0,
     kioskErrors: 0,
     kioskWarnings: [],
+    billingInfoCreated: 0,
+    billingErrors: 0,
+    billingWarnings: [],
     schedulesProcessed: 0,
     invoiceHeadersCreated: 0,
     paymentSchedulesCreated: 0,
@@ -234,6 +273,7 @@ function aggregateBulkStats(results, dryRun) {
 
   for (const result of results) {
     const s = result.summary;
+    const b = result.billingStats;
     const k = result.kioskStats;
     const p = result.paymentStats;
 
@@ -271,6 +311,19 @@ function aggregateBulkStats(results, dryRun) {
     if (s.customerCampaignAlreadyExists) stats.customerCampaignsSkippedExisting++;
     if (s.customerLoginId == null && s.customerCampaignSkipReason) {
       stats.customerCampaignsSkippedNoCustomer++;
+    }
+
+    if (b) {
+      stats.billingInfoCreated += b.billingInfoCreated || 0;
+      if (b.errors?.length > 0) {
+        stats.billingErrors += b.errors.length;
+        stats.billingWarnings.push({
+          mongo: s.mongoCampaignId,
+          sqlCampaignId: s.insertedCampaignId,
+          billingInfoCreated: b.billingInfoCreated ?? 0,
+          errors: [...b.errors],
+        });
+      }
     }
 
     // Kiosk stats
@@ -351,6 +404,12 @@ function printBulkStatsReport(stats, dryRun, outputPath) {
   console.log(`  CustomerCampaigns skip:   ${stats.customerCampaignsSkippedExisting} (link already existed)`);
   console.log(`  CustomerCampaigns skip:   ${stats.customerCampaignsSkippedNoCustomer} (no customer resolved)`);
 
+  console.log(`\n[Campaign billing info]`);
+  console.log(`  CampaignBillingInfo ${dryRun ? "would be" : ""} created: ${stats.billingInfoCreated}`);
+  if (stats.billingErrors > 0) {
+    console.log(`  Billing warnings/errors:  ${stats.billingErrors} (see [Billing warnings] below)`);
+  }
+
   console.log(`\n[Kiosk Migration]`);
   console.log(`  Bookings processed:       ${stats.bookingsProcessed}`);
   console.log(`  CampaignKiosks ${dryRun ? 'would be' : ''} linked:     ${stats.campaignKiosksCreated}`);
@@ -377,6 +436,7 @@ function printBulkStatsReport(stats, dryRun, outputPath) {
     stats.customerAccountsInserted +
     stats.customerLoginsInserted +
     stats.customerCampaignsInserted +
+    stats.billingInfoCreated +
     stats.campaignKiosksCreated +
     stats.kiosksCreated +
     stats.venuesCreated +
@@ -402,6 +462,20 @@ function printBulkStatsReport(stats, dryRun, outputPath) {
     console.log("\n[Failures — campaign migration]");
     for (const f of stats.failures) {
       console.log(`  ${f.mongo}: ${f.error}`);
+    }
+  }
+
+  if (stats.billingWarnings?.length) {
+    console.log("\n[Billing warnings — campaign ok, billing step had issues]");
+    for (const w of stats.billingWarnings) {
+      const cid =
+        w.sqlCampaignId != null && w.sqlCampaignId > 0 ? `SQL Campaign.ID ${w.sqlCampaignId}` : "no SQL ID";
+      console.log(
+        `  ${w.mongo} (${cid}) — billing rows ${w.billingInfoCreated}, ${w.errors.length} issue(s):`
+      );
+      for (let i = 0; i < w.errors.length; i++) {
+        console.log(`      ${i + 1}. ${w.errors[i]}`);
+      }
     }
   }
 
@@ -499,6 +573,41 @@ async function main() {
         logPrefix: prefix,
       });
 
+      // Billing: mongo campaigns → CampaignBillingInfo (needs SQL Campaign.ID)
+      let billingStats = null;
+      if (result.ok) {
+        const sqlCampaignIdForBilling =
+          result.summary.insertedCampaignId ?? (dryRun ? -1 : null);
+        try {
+          if (sqlCampaignIdForBilling == null) {
+            billingStats = {
+              ok: false,
+              billingInfoCreated: 0,
+              errors: ["No SQL Campaign.ID — billing step skipped"],
+            };
+          } else {
+            billingStats = await migrateCampaignBillingInfo(
+              ctx.pool,
+              mongoCampaignId,
+              sqlCampaignIdForBilling,
+              { dryRun, verbose: false }
+            );
+          }
+          logBillingIssues(prefix, mongoCampaignId, sqlCampaignIdForBilling, billingStats);
+        } catch (err) {
+          const msg = err.message || String(err);
+          console.error(`${prefix}  [billing] fatal error: ${msg}`);
+          if (err.stack) console.error(err.stack);
+          billingStats = {
+            ok: false,
+            billingInfoCreated: 0,
+            errors: [`Billing migration fatal: ${msg}`],
+          };
+        }
+      }
+
+      result.billingStats = billingStats;
+
       // Kiosks: after campaign step (real run needs SQL Campaign.ID; dry run uses placeholder)
       let kioskStats = null;
       if (result.ok) {
@@ -589,6 +698,9 @@ async function main() {
 
       if (result.ok) {
         okCount++;
+        const billingSummary = result.billingStats?.billingInfoCreated
+          ? ` | Billing: 1 row`
+          : "";
         const kioskSummary = result.kioskStats
           ? ` | Kiosks: ${result.kioskStats.campaignKiosksCreated} linked, ${result.kioskStats.kiosksCreated} created, ${result.kioskStats.venuesCreated} venues`
           : "";
@@ -596,10 +708,10 @@ async function main() {
           ? ` | Payments: ${result.paymentStats.paymentSchedulesCreated} rows, ${result.paymentStats.invoiceHeadersCreated} invoices`
           : "";
         if (dryRun) {
-          console.log(`${prefix}  → dry-run ok${kioskSummary}${paymentSummary}`);
+          console.log(`${prefix}  → dry-run ok${billingSummary}${kioskSummary}${paymentSummary}`);
         } else {
           console.log(
-            `${prefix}  → ok Campaign.ID=${result.summary.insertedCampaignId ?? "n/a"} OrderNumber=${result.summary.orderNumber ?? "n/a"}${kioskSummary}${paymentSummary}`
+            `${prefix}  → ok Campaign.ID=${result.summary.insertedCampaignId ?? "n/a"} OrderNumber=${result.summary.orderNumber ?? "n/a"}${billingSummary}${kioskSummary}${paymentSummary}`
           );
         }
       } else {
@@ -626,6 +738,9 @@ async function main() {
       "customer_account_inserted",
       "customer_login_inserted",
       "customer_campaign_already_exists",
+      "billing_info_created",
+      "billing_error_count",
+      "billing_error_messages",
       "bookings_processed",
       "campaign_kiosks_created",
       "kiosks_created",
