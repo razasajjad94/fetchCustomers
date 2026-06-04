@@ -45,6 +45,7 @@ import {
   createMigrationContext,
   migrateOneCampaign,
 } from "./migrate-single-campaign-mongo-to-sql-v3.js";
+import { migrateCampaignKiosks } from "./migrate-campaign-kiosks.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -104,6 +105,7 @@ function formatSqlTarget(connectionString) {
  */
 function formatBulkResultLine(result) {
   const s = result.summary;
+  const k = result.kioskStats || {};
   return [
     s.mongoCampaignId,
     result.ok ? "ok" : "error",
@@ -118,6 +120,13 @@ function formatBulkResultLine(result) {
     s.customerAccountInserted ? "1" : "0",
     s.customerLoginInserted ? "1" : "0",
     s.customerCampaignAlreadyExists ? "1" : "0",
+    k.bookingsProcessed ?? "",
+    k.campaignKiosksCreated ?? "",
+    k.kiosksCreated ?? "",
+    k.kiosksReused ?? "",
+    k.venuesCreated ?? "",
+    k.venuesReused ?? "",
+    k.errors?.length ?? "",
     result.error ?? s.error ?? "",
   ]
     .map(escapeCsvCell)
@@ -145,12 +154,21 @@ function aggregateBulkStats(results, dryRun) {
     wouldCreateUser: 0,
     wouldCreateAccount: 0,
     wouldCreateLogin: 0,
+    bookingsProcessed: 0,
+    campaignKiosksCreated: 0,
+    kiosksCreated: 0,
+    kiosksReused: 0,
+    venuesCreated: 0,
+    venuesReused: 0,
+    kioskErrors: 0,
     campaignLinks: [],
     failures: [],
   };
 
   for (const result of results) {
     const s = result.summary;
+    const k = result.kioskStats;
+
     if (!result.ok) {
       stats.failed++;
       stats.failures.push({ mongo: s.mongoCampaignId, error: result.error ?? s.error });
@@ -185,6 +203,19 @@ function aggregateBulkStats(results, dryRun) {
     if (s.customerCampaignAlreadyExists) stats.customerCampaignsSkippedExisting++;
     if (s.customerLoginId == null && s.customerCampaignSkipReason) {
       stats.customerCampaignsSkippedNoCustomer++;
+    }
+
+    // Kiosk stats
+    if (k) {
+      stats.bookingsProcessed += k.bookingsProcessed || 0;
+      stats.campaignKiosksCreated += k.campaignKiosksCreated || 0;
+      stats.kiosksCreated += k.kiosksCreated || 0;
+      stats.kiosksReused += k.kiosksReused || 0;
+      stats.venuesCreated += k.venuesCreated || 0;
+      stats.venuesReused += k.venuesReused || 0;
+      if (k.errors && k.errors.length > 0) {
+        stats.kioskErrors += k.errors.length;
+      }
     }
 
     stats.campaignLinks.push({
@@ -228,13 +259,27 @@ function printBulkStatsReport(stats, dryRun, outputPath) {
   console.log(`  CustomerCampaigns skip:   ${stats.customerCampaignsSkippedExisting} (link already existed)`);
   console.log(`  CustomerCampaigns skip:   ${stats.customerCampaignsSkippedNoCustomer} (no customer resolved)`);
 
+  console.log(`\n[Kiosk Migration]`);
+  console.log(`  Bookings processed:       ${stats.bookingsProcessed}`);
+  console.log(`  CampaignKiosks ${dryRun ? 'would be' : ''} linked:     ${stats.campaignKiosksCreated}`);
+  console.log(`  Kiosks created:           ${stats.kiosksCreated}`);
+  console.log(`  Kiosks reused:            ${stats.kiosksReused}`);
+  console.log(`  Venues created:           ${stats.venuesCreated}`);
+  console.log(`  Venues reused:            ${stats.venuesReused}`);
+  if (stats.kioskErrors > 0) {
+    console.log(`  Kiosk warnings/errors:    ${stats.kioskErrors}`);
+  }
+
   const totalSqlWrites =
     stats.campaignsInserted +
     stats.orderNumbersSet +
     stats.usersInserted +
     stats.customerAccountsInserted +
     stats.customerLoginsInserted +
-    stats.customerCampaignsInserted;
+    stats.customerCampaignsInserted +
+    stats.campaignKiosksCreated +
+    stats.kiosksCreated +
+    stats.venuesCreated;
 
   console.log(`\n[SQL write operations total]  +${dryRun ? 0 : totalSqlWrites} ${dryRun ? "(dry run)" : ""}`);
 
@@ -324,15 +369,53 @@ async function main() {
         logPrefix: prefix,
       });
 
+      // Kiosks: after campaign step (real run needs SQL Campaign.ID; dry run uses placeholder)
+      let kioskStats = null;
+      if (result.ok) {
+        const sqlCampaignIdForKiosks =
+          result.summary.insertedCampaignId ?? (dryRun ? -1 : null);
+        try {
+          if (sqlCampaignIdForKiosks == null) {
+            kioskStats = {
+              ok: false,
+              bookingsProcessed: 0,
+              campaignKiosksCreated: 0,
+              kiosksCreated: 0,
+              kiosksReused: 0,
+              venuesCreated: 0,
+              venuesReused: 0,
+              errors: ["No SQL Campaign.ID — kiosk step skipped"],
+            };
+          } else {
+          kioskStats = await migrateCampaignKiosks(
+            ctx.pool,
+            mongoCampaignId,
+            sqlCampaignIdForKiosks,
+            { dryRun, verbose: false }
+          );
+          }
+          if (kioskStats.errors.length > 0) {
+            console.log(`${prefix}  → kiosk warnings: ${kioskStats.errors.length}`);
+          }
+        } catch (err) {
+          console.error(`${prefix}  → kiosk migration error: ${err.message}`);
+          kioskStats = { ok: false, errors: [err.message] };
+        }
+      }
+
+      result.kioskStats = kioskStats;
       results.push(result);
 
       if (result.ok) {
         okCount++;
+        const kioskSummary = result.kioskStats 
+          ? ` | Kiosks: ${result.kioskStats.campaignKiosksCreated} linked, ${result.kioskStats.kiosksCreated} created, ${result.kioskStats.venuesCreated} venues`
+          : "";
         if (dryRun) {
-          console.log(`${prefix}  → dry-run ok`);
+          console.log(`${prefix}  → dry-run ok${kioskSummary}`);
         } else {
           console.log(
-            `${prefix}  → ok Campaign.ID=${result.summary.insertedCampaignId ?? "n/a"} OrderNumber=${result.summary.orderNumber ?? "n/a"}`
+            `${prefix}  → ok Campaign.ID=${result.summary.insertedCampaignId ?? "n/a"} OrderNumber=${result.summary.orderNumber ?? "n/a"}${kioskSummary}`
           );
         }
       } else {
@@ -359,6 +442,13 @@ async function main() {
       "customer_account_inserted",
       "customer_login_inserted",
       "customer_campaign_already_exists",
+      "bookings_processed",
+      "campaign_kiosks_created",
+      "kiosks_created",
+      "kiosks_reused",
+      "venues_created",
+      "venues_reused",
+      "kiosk_errors",
       "error",
     ].join(",");
 
