@@ -261,7 +261,7 @@ function mapMongoKioskToSql(kioskString, venueId) {
     VenueID: venueId,
     IsDigital: 0, // Default; adjust if mongo has digital flag
     Sellable: 1, // Default
-    Retired: 0, // Default
+    Retired: 1, // New migrated kiosks: always Retired = true
     CreatedDate: new Date(),
     CreatedUserID: DEFAULT_SYSTEM_USER_ID,
   };
