@@ -50,8 +50,8 @@ const PAYMENT_SCHEDULE_STATUS_FROM_PAID = 19;
 const PAYMENT_SCHEDULE_STATUS_FROM_FAILED = 21;
 const PAYMENT_SCHEDULE_STATUS_FROM_UNPAID = 22;
 
-/** PaymentSchedule.CreatedUser is NOT NULL — set null on InvoiceHeader CreatedUser/UpdatedUser */
-const DEFAULT_PAYMENT_SCHEDULE_CREATED_USER = 1;
+/** PaymentSchedule.CreatedUser is NOT NULL — migration sentinel (no Users FK) */
+const DEFAULT_PAYMENT_SCHEDULE_CREATED_USER = -1;
 
 // =============================================================================
 // HELPERS
@@ -227,8 +227,8 @@ async function insertInvoiceHeaderRow(pool, row) {
   request.input("voided", sql.Bit, row.Voided);
   request.input("createdDate", sql.DateTime, row.CreatedDate);
   request.input("lastUpdated", sql.DateTime, row.LastUpdated);
-  request.input("createdUser", sql.Int, row.CreatedUser);
-  request.input("updatedUser", sql.Int, row.UpdatedUser);
+  request.input("createdUser", sql.Int, row.CreatedUser ?? null);
+  request.input("updatedUser", sql.Int, row.UpdatedUser ?? null);
 
   const result = await request.query(`
     INSERT INTO ${SQL_INVOICE_HEADER_TABLE} (
@@ -253,8 +253,12 @@ async function insertPaymentScheduleRow(pool, row) {
   request.input("createdDate", sql.DateTime, row.CreatedDate);
   request.input("lastUpdated", sql.DateTime, row.LastUpdated);
   request.input("processorResponse", sql.VarChar(500), row.ProcessorResponse);
-  request.input("createdUser", sql.Int, row.CreatedUser);
-  request.input("updatedUser", sql.Int, row.UpdatedUser);
+  request.input(
+    "createdUser",
+    sql.Int,
+    row.CreatedUser ?? DEFAULT_PAYMENT_SCHEDULE_CREATED_USER
+  );
+  request.input("updatedUser", sql.Int, row.UpdatedUser ?? null);
 
   const result = await request.query(`
     INSERT INTO ${SQL_PAYMENT_SCHEDULE_TABLE} (

@@ -24,8 +24,7 @@
  *   - Pricing fields (ContractPrice, EvergreenPrice) mapped from mongo booking if available,
  *     otherwise defaults to 0 (checks: contract_price, price, evergreen_price, monthly_price)
  *   - KioskAdPlacementID default = 1 (adjust if needed)
- *   - CampaignKiosks.CreatedUserID = NULL (nullable; no FK to Users)
- *   - Venues/Kiosks create paths may still use DEFAULT_SYSTEM_USER_ID where NOT NULL
+ *   - CampaignKiosks / Venues / Kiosks user FK columns = NULL (no placeholder Users.ID)
  *   - Deduplication: Venues by ImportVenueID, Kiosks by ImportKioskID
  */
 import mongodb from "mongodb";
@@ -47,8 +46,7 @@ const SQL_CAMPAIGN_KIOSKS_TABLE = "CampaignKiosks";
 const SQL_KIOSKS_TABLE = "Kiosks";
 const SQL_VENUES_TABLE = "Venues";
 
-// Default values for required NOT NULL fields
-const DEFAULT_SYSTEM_USER_ID = null; // System user for Created/Updated fields
+// User FK columns — always NULL on insert (avoids FK_CreatedUserID / FK_CreateUserID errors)
 const DEFAULT_KIOSK_AD_PLACEMENT_ID = 1; // Adjust based on your SQL data
 const DEFAULT_CONTRACT_PRICE = 0; // Placeholder (skip pricing per user request)
 const DEFAULT_EVERGREEN_PRICE = 0; // Placeholder
@@ -246,7 +244,7 @@ function mapMongoVenueToSql(mongoDoc) {
     Retired: mongoDoc.retired === true ? 1 : 0,
     ImportVenueID: importVenueId ? parseInt(importVenueId, 10) : null,
     CreatedDate: created,
-    CreateUserID: DEFAULT_SYSTEM_USER_ID,
+    CreateUserID: null,
     PermanentlyClosed: 0,
     Sellable: mongoDoc.sellable === "yes" || mongoDoc.sellable === true ? 1 : 0,
   };
@@ -263,7 +261,7 @@ function mapMongoKioskToSql(kioskString, venueId) {
     Sellable: 1, // Default
     Retired: 1, // New migrated kiosks: always Retired = true
     CreatedDate: new Date(),
-    CreatedUserID: DEFAULT_SYSTEM_USER_ID,
+    CreatedUserID: null,
   };
 }
 
@@ -323,7 +321,7 @@ async function insertVenueRow(pool, row) {
   request.input("retired", sql.Bit, row.Retired);
   request.input("importVenueID", sql.Int, row.ImportVenueID);
   request.input("createdDate", sql.DateTime, row.CreatedDate);
-  request.input("createUserID", sql.Int, row.CreateUserID);
+  request.input("createUserID", sql.Int, row.CreateUserID ?? null);
   request.input("permanentlyClosed", sql.Bit, row.PermanentlyClosed);
   request.input("sellable", sql.Bit, row.Sellable);
 
@@ -353,7 +351,7 @@ async function insertKioskRow(pool, row) {
   request.input("sellable", sql.Bit, row.Sellable);
   request.input("retired", sql.Bit, row.Retired);
   request.input("createdDate", sql.DateTime, row.CreatedDate);
-  request.input("createdUserID", sql.Int, row.CreatedUserID);
+  request.input("createdUserID", sql.Int, row.CreatedUserID ?? null);
 
   const result = await request.query(`
     INSERT INTO ${SQL_KIOSKS_TABLE} (
