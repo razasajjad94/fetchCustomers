@@ -15,9 +15,14 @@
     "migrate:campaigns-bulk-from-csv:limit5": "node migrate-campaigns-bulk-from-csv.js --limit 5",
     "migrate:campaigns-bulk-from-csv:dry-run:limit5": "node migrate-campaigns-bulk-from-csv.js --dry-run --limit 5",
     "migrate:campaigns-bulk-from-csv:stop-on-error": "node migrate-campaigns-bulk-from-csv.js --stop-on-error",
-    "migrate:campaigns-bulk-from-csv:dry-run:stop-on-error": "node migrate-campaigns-bulk-from-csv.js --dry-run --stop-on-error"
+    "migrate:campaigns-bulk-from-csv:dry-run:stop-on-error": "node migrate-campaigns-bulk-from-csv.js --dry-run --stop-on-error",
+
+    "migrate:display-images-to-azure": "node display-images-blob-migration/migrate-s3-to-azure.js",
+    "migrate:display-images-to-azure:dry-run": "node display-images-blob-migration/migrate-s3-to-azure.js --dry-run",
+    "migrate:display-images-to-azure:dry-run:limit5": "node display-images-blob-migration/migrate-s3-to-azure.js --dry-run --limit 5"
   },
   "dependencies": {
+    "@azure/storage-blob": "^12.28.0",
     "mongodb": "^6.17.0",
     "mssql": "^11.0.1"
   }
