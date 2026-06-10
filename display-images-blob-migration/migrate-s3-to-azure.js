@@ -7,9 +7,13 @@
  * Reads Mongo displayimages, resolves import_kiosk_id from kiosks collection,
  * downloads each image from S3, uploads to Azure Blob.
  *
- * Blob path format:
+ * Blob path format (bulk — no campaign folder):
  *   {blobPrefix}/{import_kiosk_id}/{filename}
  *   e.g. mongo_installed_image_url/10006A/display-image-1486679320780
+ *
+ * Per-campaign (from bulk CSV orchestrator):
+ *   {blobPrefix}/{sqlCampaignId}/{import_kiosk_id}/{filename}
+ *   see migrate-campaign-display-images-to-azure.js
  *   (filename from S3 URL pathname — no extension added by this script)
  *
  * Mongo collections (mydb):
@@ -114,10 +118,14 @@ function blobFilenameFromUrl(imageUrl, fallbackId) {
   return fallbackId ? `display-image-${fallbackId}` : `display-image-${Date.now()}`;
 }
 
-function buildBlobPath(blobPrefix, importKioskId, filename) {
+function buildBlobPath(blobPrefix, importKioskId, filename, sqlCampaignId = null) {
   const safeKioskId = String(importKioskId).trim().replace(/[/\\]/g, "-");
   const safeFilename = path.basename(filename);
-  return `${blobPrefix}/${safeKioskId}/${safeFilename}`;
+  const campaignSegment =
+    sqlCampaignId != null && String(sqlCampaignId).trim() !== ""
+      ? `${String(sqlCampaignId).trim()}/`
+      : "";
+  return `${blobPrefix}/${campaignSegment}${safeKioskId}/${safeFilename}`;
 }
 
 function trimConfigValue(value) {
@@ -159,9 +167,9 @@ function logMigrationIssue(row, err, errorLogPath, options = {}) {
   }
 }
 
-function initErrorLogFile(errorLogPath) {
+export function initErrorLogFile(errorLogPath, title) {
   const header = [
-    `=== Display images migration (bulk) — ${new Date().toISOString()} ===`,
+    `=== ${title || "Display images migration (bulk)"} — ${new Date().toISOString()} ===`,
     "",
   ].join("\n");
   fs.writeFileSync(errorLogPath, `${header}\n`, "utf8");
@@ -179,7 +187,7 @@ function appendErrorLogFile(errorLogPath, row, message) {
   fs.appendFileSync(errorLogPath, block, "utf8");
 }
 
-function printErrorReport(resultRows, errorLogPath) {
+export function printErrorReport(resultRows, errorLogPath) {
   const issues = resultRows.filter(
     (r) => r.status === "error" || (r.status === "skipped" && r.error)
   );
@@ -197,7 +205,7 @@ function printErrorReport(resultRows, errorLogPath) {
   }
 }
 
-function validateAzureConfig(config) {
+export function validateAzureConfig(config) {
   if (!trimConfigValue(config.connectionString)) {
     throw new Error(
       "Azure connection string is empty. Set AZURE_BLOB_CONFIG.connectionString in blob-storage-config.js"
@@ -211,7 +219,7 @@ function validateAzureConfig(config) {
   }
 }
 
-function createEmptyStats() {
+export function createEmptyStats() {
   return {
     processed: 0,
     uploaded: 0,
@@ -357,7 +365,7 @@ async function uploadToAzure(containerClient, blobPath, buffer, contentType) {
 /**
  * Process one displayImages document → download S3, upload Azure (or dry-run preview).
  */
-async function processDisplayImageDoc(doc, context) {
+export async function processDisplayImageDoc(doc, context) {
   const {
     dryRun,
     skipExisting,
@@ -367,6 +375,7 @@ async function processDisplayImageDoc(doc, context) {
     containerClient,
     stats,
     errorLogPath,
+    sqlCampaignId = null,
   } = context;
 
   stats.processed++;
@@ -377,6 +386,7 @@ async function processDisplayImageDoc(doc, context) {
 
   const baseRow = {
     displayImageId,
+    sqlCampaignId: sqlCampaignId != null ? String(sqlCampaignId) : "",
     kioskHex: kioskHexPreview,
     imageUrl,
     importKioskId: "",
@@ -421,7 +431,12 @@ async function processDisplayImageDoc(doc, context) {
   const importKioskId = resolved.importKioskId;
 
   const blobFilename = blobFilenameFromUrl(imageUrl, displayImageId);
-  const blobPath = buildBlobPath(azureConfig.blobPrefix, importKioskId, blobFilename);
+  const blobPath = buildBlobPath(
+    azureConfig.blobPrefix,
+    importKioskId,
+    blobFilename,
+    sqlCampaignId
+  );
 
   baseRow.importKioskId = importKioskId;
   baseRow.blobPath = blobPath;
@@ -561,9 +576,10 @@ export async function migrateDisplayImages(options) {
   }
 }
 
-function writeResultsCsv(outputPath, rows) {
+export function writeResultsCsv(outputPath, rows) {
   const header = [
     "display_image_id",
+    "sql_campaign_id",
     "kiosk_id",
     "import_kiosk_id",
     "source_image_url",
@@ -576,6 +592,7 @@ function writeResultsCsv(outputPath, rows) {
   const lines = rows.map((r) =>
     [
       r.displayImageId,
+      r.sqlCampaignId ?? "",
       r.kioskHex,
       r.importKioskId,
       r.imageUrl,

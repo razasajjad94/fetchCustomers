@@ -12,6 +12,8 @@
 
     "migrate:campaigns-bulk-from-csv": "node migrate-campaigns-bulk-from-csv.js",
     "migrate:campaigns-bulk-from-csv:dry-run": "node migrate-campaigns-bulk-from-csv.js --dry-run",
+    "migrate:campaigns-bulk-from-csv:limit1": "node migrate-campaigns-bulk-from-csv.js --limit 1",
+    "migrate:campaigns-bulk-from-csv:dry-run:limit1": "node migrate-campaigns-bulk-from-csv.js --dry-run --limit 1",
     "migrate:campaigns-bulk-from-csv:limit5": "node migrate-campaigns-bulk-from-csv.js --limit 5",
     "migrate:campaigns-bulk-from-csv:dry-run:limit5": "node migrate-campaigns-bulk-from-csv.js --dry-run --limit 5",
     "migrate:campaigns-bulk-from-csv:stop-on-error": "node migrate-campaigns-bulk-from-csv.js --stop-on-error",
@@ -19,7 +21,12 @@
 
     "migrate:display-images-to-azure": "node display-images-blob-migration/migrate-s3-to-azure.js",
     "migrate:display-images-to-azure:dry-run": "node display-images-blob-migration/migrate-s3-to-azure.js --dry-run",
-    "migrate:display-images-to-azure:dry-run:limit5": "node display-images-blob-migration/migrate-s3-to-azure.js --dry-run --limit 5"
+    "migrate:display-images-to-azure:dry-run:limit5": "node display-images-blob-migration/migrate-s3-to-azure.js --dry-run --limit 5",
+
+    "populate:installed-image-url": "node populate-installed-image-url/populate-installed-image-url.js",
+    "populate:installed-image-url:dry-run": "node populate-installed-image-url/populate-installed-image-url.js --dry-run",
+    "populate:installed-image-url:dry-run:limit1": "node populate-installed-image-url/populate-installed-image-url.js --dry-run --limit 1",
+    "populate:installed-image-url:dry-run:limit5": "node populate-installed-image-url/populate-installed-image-url.js --dry-run --limit 5"
   },
   "dependencies": {
     "@azure/storage-blob": "^12.28.0",

@@ -11,8 +11,13 @@
  *      (same mapping/insert logic as single-campaign script — customer, sales rep, OrderNumber, etc.)
  *   4. migrateCampaignBillingInfo() — mongo campaigns → CampaignBillingInfo
  *   5. migrateCampaignKiosks() — bookings / displays / venues / kiosks
- *   6. migrateCampaignPaymentSchedules() — paymentschedules → InvoiceHeader + PaymentSchedule
- *   7. Write migration_bulk_results.csv with ok/error per row
+ *   6. migrateCampaignDisplayImagesToAzure() — displayimages for this campaign only
+ *      Blob path: {blobPrefix}/{sqlCampaignId}/{import_kiosk_id}/{filename}
+ *      Then UPDATE CampaignKiosks.InstalledImageUrl = blob_url
+ *   7. migrateCampaignPaymentSchedules() — paymentschedules → InvoiceHeader + PaymentSchedule
+ *   8. Write migration_bulk_results.csv with ok/error per row
+ *
+ *   Use --skip-images to skip step 6. Default: migrate images per campaign.
  *
  * WHAT THIS FILE DOES NOT CONTAIN:
  *   Field mapping, SQL INSERTs, and deduplication rules are all in:
@@ -51,6 +56,7 @@ import {
 import { migrateCampaignBillingInfo } from "./migrate-campaign-billing-info.js";
 import { migrateCampaignKiosks } from "./migrate-campaign-kiosks.js";
 import { migrateCampaignPaymentSchedules } from "./migrate-campaign-payment-schedules.js";
+import { migrateCampaignDisplayImagesToAzure } from "./display-images-blob-migration/migrate-campaign-display-images-to-azure.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -84,6 +90,9 @@ const DRY_RUN = false;
 
 /** true = stop loop on first failed campaign; false = log error and continue */
 const STOP_ON_ERROR = false;
+
+/** true = after each campaign, upload display images to Azure for that campaign only */
+const MIGRATE_DISPLAY_IMAGES_PER_CAMPAIGN = true;
 
 // =============================================================================
 // CLI helpers
@@ -155,6 +164,35 @@ function logKioskIssues(logPrefix, mongoCampaignId, sqlCampaignId, kioskStats) {
   }
 }
 
+/** Print display image blob step summary. */
+function logImageIssues(logPrefix, mongoCampaignId, sqlCampaignId, imageStats) {
+  if (!imageStats) return;
+
+  const s = imageStats.stats ?? {};
+  const errs = imageStats.errors ?? [];
+
+  if ((s.displayImagesFound ?? 0) === 0 && errs.length === 0) {
+    console.log(`${logPrefix}  [images] no displayimages for campaign kiosks`);
+    return;
+  }
+
+  console.log(
+    `${logPrefix}  [images] importKioskIds=${s.importKioskIdsFound ?? 0} displayimages=${s.displayImagesFound ?? 0} uploaded=${s.uploaded ?? 0} dry-run=${s.dryRunWouldUpload ?? 0} skipped=${s.skippedExisting ?? 0} failed=${s.failed ?? 0} | InstalledImageUrl updated=${s.installedImageUrlUpdated ?? 0} dry-run=${s.installedImageUrlDryRunWouldUpdate ?? 0}`
+  );
+  if (imageStats.outputPath) {
+    console.log(`${logPrefix}  [images] results: ${imageStats.outputPath}`);
+  }
+
+  if (errs.length === 0) return;
+
+  console.warn(
+    `${logPrefix}  [images] ${errs.length} error(s) — campaign ${mongoCampaignId}${sqlCampaignId != null && sqlCampaignId > 0 ? ` → SQL Campaign.ID ${sqlCampaignId}` : ""}:`
+  );
+  for (let i = 0; i < errs.length; i++) {
+    console.warn(`${logPrefix}    ${i + 1}. ${errs[i]}`);
+  }
+}
+
 /** Print payment schedule step summary and warnings. */
 function logPaymentIssues(logPrefix, mongoCampaignId, sqlCampaignId, paymentStats) {
   if (!paymentStats) return;
@@ -193,13 +231,20 @@ function formatBulkResultLine(result) {
   const s = result.summary;
   const b = result.billingStats || {};
   const k = result.kioskStats || {};
+  const img = result.imageStats || {};
+  const is = img.stats || {};
   const p = result.paymentStats || {};
   return [
     s.mongoCampaignId,
     result.ok ? "ok" : "error",
+    s.dryRun ? "yes" : "no",
     s.insertedCampaignId ?? "",
-    s.orderNumber ?? "",
+    s.campaignName ?? "",
+    s.orderNumber ?? s.orderNumberPreview ?? "",
     s.campaignStatusId ?? "",
+    s.sqlStatusName ?? "",
+    s.mongoCustomerId ?? "",
+    s.mongoCustomerEmail ?? "",
     s.salesRepUserId ?? "",
     s.customerLoginId ?? "",
     s.campaignInserted ? "1" : "0",
@@ -219,6 +264,24 @@ function formatBulkResultLine(result) {
     k.venuesReused ?? "",
     k.errors?.length ?? "",
     (k.errors && k.errors.length ? k.errors.join(" || ") : ""),
+    result.migrateImages ? "yes" : "no",
+    is.importKioskIdsFound ?? "",
+    is.kiosksMatched ?? "",
+    is.displayImagesFound ?? "",
+    is.uploaded ?? "",
+    is.dryRunWouldUpload ?? "",
+    is.skippedExisting ?? "",
+    is.skippedNoUrl ?? "",
+    is.skippedNoImportId ?? "",
+    is.failed ?? "",
+    is.installedImageUrlUpdated ?? "",
+    is.installedImageUrlDryRunWouldUpdate ?? "",
+    is.installedImageUrlSkippedExisting ?? "",
+    is.installedImageUrlSkippedNoCampaignKiosk ?? "",
+    is.installedImageUrlFailed ?? "",
+    img.outputPath ?? "",
+    img.errors?.length ?? "",
+    (img.errors && img.errors.length ? img.errors.join(" || ") : ""),
     p.schedulesProcessed ?? "",
     p.invoiceHeadersCreated ?? "",
     p.paymentSchedulesCreated ?? "",
@@ -259,6 +322,17 @@ function aggregateBulkStats(results, dryRun) {
     venuesReused: 0,
     kioskErrors: 0,
     kioskWarnings: [],
+    imageImportKioskIdsFound: 0,
+    imageDisplayImagesFound: 0,
+    imagesUploaded: 0,
+    imagesDryRunWouldUpload: 0,
+    imagesSkippedExisting: 0,
+    imageErrors: 0,
+    imageWarnings: [],
+    installedImageUrlUpdated: 0,
+    installedImageUrlDryRunWouldUpdate: 0,
+    installedImageUrlSkippedExisting: 0,
+    installedImageUrlFailed: 0,
     billingInfoCreated: 0,
     billingErrors: 0,
     billingWarnings: [],
@@ -275,6 +349,7 @@ function aggregateBulkStats(results, dryRun) {
     const s = result.summary;
     const b = result.billingStats;
     const k = result.kioskStats;
+    const img = result.imageStats;
     const p = result.paymentStats;
 
     if (!result.ok) {
@@ -322,6 +397,27 @@ function aggregateBulkStats(results, dryRun) {
           sqlCampaignId: s.insertedCampaignId,
           billingInfoCreated: b.billingInfoCreated ?? 0,
           errors: [...b.errors],
+        });
+      }
+    }
+
+    if (img?.stats) {
+      const is = img.stats;
+      stats.imageImportKioskIdsFound += is.importKioskIdsFound || 0;
+      stats.imageDisplayImagesFound += is.displayImagesFound || 0;
+      stats.imagesUploaded += is.uploaded || 0;
+      stats.imagesDryRunWouldUpload += is.dryRunWouldUpload || 0;
+      stats.imagesSkippedExisting += is.skippedExisting || 0;
+      stats.imageErrors += is.failed || 0;
+      stats.installedImageUrlUpdated += is.installedImageUrlUpdated || 0;
+      stats.installedImageUrlDryRunWouldUpdate += is.installedImageUrlDryRunWouldUpdate || 0;
+      stats.installedImageUrlSkippedExisting += is.installedImageUrlSkippedExisting || 0;
+      stats.installedImageUrlFailed += is.installedImageUrlFailed || 0;
+      if (img.errors?.length > 0) {
+        stats.imageWarnings.push({
+          mongo: s.mongoCampaignId,
+          sqlCampaignId: s.insertedCampaignId,
+          errors: [...img.errors],
         });
       }
     }
@@ -421,6 +517,19 @@ function printBulkStatsReport(stats, dryRun, outputPath) {
     console.log(`  Kiosk warnings/errors:    ${stats.kioskErrors} (see [Kiosk warnings] below)`);
   }
 
+  console.log(`\n[Display images → Azure Blob]`);
+  console.log(`  ImportKioskIDs seen:      ${stats.imageImportKioskIdsFound}`);
+  console.log(`  displayimages rows:       ${stats.imageDisplayImagesFound}`);
+  console.log(`  Uploaded:                 ${stats.imagesUploaded}`);
+  console.log(`  Dry-run would upload:     ${stats.imagesDryRunWouldUpload}`);
+  console.log(`  Skipped (blob exists):    ${stats.imagesSkippedExisting}`);
+  if (stats.imageErrors > 0) {
+    console.log(`  Image upload failures:    ${stats.imageErrors}`);
+  }
+  console.log(`  InstalledImageUrl updated: ${stats.installedImageUrlUpdated}`);
+  console.log(`  InstalledImageUrl dry-run: ${stats.installedImageUrlDryRunWouldUpdate}`);
+  console.log(`  Per-campaign results:     display-images-blob-migration/campaign-runs/{sqlCampaignId}/`);
+
   console.log(`\n[Payment schedules]`);
   console.log(`  Mongo schedules processed:  ${stats.schedulesProcessed}`);
   console.log(`  InvoiceHeader ${dryRun ? "would be" : ""} created:     ${stats.invoiceHeadersCreated}`);
@@ -518,6 +627,8 @@ function printBulkStatsReport(stats, dryRun, outputPath) {
 async function main() {
   const dryRun = DRY_RUN || getCliFlag(process.argv, "--dry-run");
   const stopOnError = STOP_ON_ERROR || getCliFlag(process.argv, "--stop-on-error");
+  const migrateImages =
+    MIGRATE_DISPLAY_IMAGES_PER_CAMPAIGN && !getCliFlag(process.argv, "--skip-images");
   const inputPath = getArg(process.argv, "--input") || resolveDefaultInputPath();
   const outputPath = getArg(process.argv, "--output") || DEFAULT_OUTPUT;
   const limitArg = getArg(process.argv, "--limit");
@@ -545,6 +656,7 @@ async function main() {
   console.log(`Output:     ${outputPath}`);
   console.log(`Dry run:    ${dryRun ? "yes" : "no"}`);
   console.log(`On error:   ${stopOnError ? "stop batch" : "continue"}`);
+  console.log(`Images:     ${migrateImages ? "yes — per campaign after kiosks" : "no (--skip-images)"}`);
   console.log(`SQL target: ${formatSqlTarget(SQL_V3_CONNECTION_STRING)}`);
   console.log(`Logic from: migrate-single-campaign-mongo-to-sql-v3.js\n`);
 
@@ -658,6 +770,43 @@ async function main() {
 
       result.kioskStats = kioskStats;
 
+      let imageStats = null;
+      if (result.ok && migrateImages) {
+        const sqlCampaignIdForImages =
+          result.summary.insertedCampaignId ?? (dryRun ? -1 : null);
+        try {
+          if (sqlCampaignIdForImages == null) {
+            imageStats = {
+              ok: false,
+              stats: { displayImagesFound: 0, uploaded: 0, failed: 0 },
+              errors: ["No SQL Campaign.ID — image blob step skipped"],
+            };
+          } else {
+            imageStats = await migrateCampaignDisplayImagesToAzure(
+              mongoCampaignId,
+              sqlCampaignIdForImages,
+              { dryRun, verbose: false, pool: ctx.pool }
+            );
+          }
+          logImageIssues(
+            prefix,
+            mongoCampaignId,
+            sqlCampaignIdForImages,
+            imageStats
+          );
+        } catch (err) {
+          const msg = err.message || String(err);
+          console.error(`${prefix}  [images] fatal error: ${msg}`);
+          imageStats = {
+            ok: false,
+            stats: { displayImagesFound: 0, uploaded: 0, failed: 1 },
+            errors: [`Image migration fatal: ${msg}`],
+          };
+        }
+      }
+
+      result.imageStats = imageStats;
+
       let paymentStats = null;
       if (result.ok) {
         const sqlCampaignIdForPayments =
@@ -694,6 +843,8 @@ async function main() {
       }
 
       result.paymentStats = paymentStats;
+      result.migrateImages = migrateImages;
+      result.dryRun = dryRun;
       results.push(result);
 
       if (result.ok) {
@@ -704,14 +855,17 @@ async function main() {
         const kioskSummary = result.kioskStats
           ? ` | Kiosks: ${result.kioskStats.campaignKiosksCreated} linked, ${result.kioskStats.kiosksCreated} created, ${result.kioskStats.venuesCreated} venues`
           : "";
+        const imageSummary = result.imageStats?.stats
+          ? ` | Images: ${result.imageStats.stats.displayImagesFound ?? 0} found, ${dryRun ? result.imageStats.stats.dryRunWouldUpload ?? 0 : result.imageStats.stats.uploaded ?? 0} ${dryRun ? "would upload" : "uploaded"}`
+          : "";
         const paymentSummary = result.paymentStats
           ? ` | Payments: ${result.paymentStats.paymentSchedulesCreated} rows, ${result.paymentStats.invoiceHeadersCreated} invoices`
           : "";
         if (dryRun) {
-          console.log(`${prefix}  → dry-run ok${billingSummary}${kioskSummary}${paymentSummary}`);
+          console.log(`${prefix}  → dry-run ok${billingSummary}${kioskSummary}${imageSummary}${paymentSummary}`);
         } else {
           console.log(
-            `${prefix}  → ok Campaign.ID=${result.summary.insertedCampaignId ?? "n/a"} OrderNumber=${result.summary.orderNumber ?? "n/a"}${billingSummary}${kioskSummary}${paymentSummary}`
+            `${prefix}  → ok Campaign.ID=${result.summary.insertedCampaignId ?? "n/a"} OrderNumber=${result.summary.orderNumber ?? "n/a"}${billingSummary}${kioskSummary}${imageSummary}${paymentSummary}`
           );
         }
       } else {
@@ -727,9 +881,14 @@ async function main() {
     const header = [
       "mongo_campaign_id",
       "status",
+      "dry_run",
       "sql_campaign_id",
+      "campaign_name",
       "order_number",
       "status_id",
+      "sql_status_name",
+      "mongo_customer_id",
+      "mongo_customer_email",
       "sales_rep_user_id",
       "customer_login_id",
       "campaign_inserted",
@@ -749,6 +908,24 @@ async function main() {
       "venues_reused",
       "kiosk_error_count",
       "kiosk_error_messages",
+      "images_step_enabled",
+      "image_import_kiosk_ids",
+      "image_kiosks_matched",
+      "image_displayimages_found",
+      "images_uploaded",
+      "images_dry_run_would_upload",
+      "images_skipped_existing",
+      "images_skipped_no_url",
+      "images_skipped_no_import_id",
+      "images_failed",
+      "installed_image_url_updated",
+      "installed_image_url_dry_run_would_update",
+      "installed_image_url_skipped_existing",
+      "installed_image_url_skipped_no_campaign_kiosk",
+      "installed_image_url_failed",
+      "image_results_path",
+      "image_error_count",
+      "image_error_messages",
       "payment_schedules_processed",
       "invoice_headers_created",
       "payment_schedules_created",

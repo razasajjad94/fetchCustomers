@@ -13,8 +13,8 @@ export const AZURE_BLOB_CONFIG = {
 
   /**
    * Top-level virtual folder inside the container.
-   * Final blob path: {blobPrefix}/{import_kiosk_id}/{filename}
-   * Example: mongo_installed_image_url/10006A/display-image-1486679320780.JPG
+   * Bulk-all path:  {blobPrefix}/{import_kiosk_id}/{filename}
+   * Per-campaign:   {blobPrefix}/{sqlCampaignId}/{import_kiosk_id}/{filename}
    */
   blobPrefix: "mongo_installed_image_url",
 
