@@ -4,9 +4,9 @@
  * =============================================================================
  *
  * After a campaign is migrated to SQL:
- *   1. Mongo bookings for campaign → displays → ImportKioskID strings
- *   2. Mongo kiosks by import_kiosk_id → kiosk ObjectIds
- *   3. Mongo displayimages for those kiosks
+ *   1. Mongo bookings for campaign → display ObjectIds (per-campaign scope)
+ *   2. Mongo displayimages WHERE display IN those display ids (not all images on kiosk)
+ *   3. Resolve import_kiosk_id from kiosks for blob path + InstalledImageUrl
  *   4. Upload to Azure:
  *      {blobPrefix}/{sqlCampaignId}/{import_kiosk_id}/{filename}
  *   5. UPDATE CampaignKiosks.InstalledImageUrl = blob_url
@@ -73,10 +73,13 @@ function campaignOutputPaths(sqlCampaignId) {
 }
 
 /**
- * bookings → displays → unique ImportKioskID strings for this campaign.
+ * bookings for campaign → display ObjectIds + ImportKioskID strings from displays.
+ * Display images are per campaign via displayimages.display → bookings.display.
  */
-async function collectImportKioskIdsForCampaign(db, mongoCampaignIdHex) {
-  if (!mongoCampaignIdHex) return [];
+async function collectCampaignBookingContext(db, mongoCampaignIdHex) {
+  if (!mongoCampaignIdHex) {
+    return { displayObjectIds: [], displayIdHexes: [], importKioskIds: [] };
+  }
 
   const campaignOid = new ObjectId(mongoCampaignIdHex);
   const bookings = await db
@@ -87,53 +90,59 @@ async function collectImportKioskIdsForCampaign(db, mongoCampaignIdHex) {
     .project({ display: 1 })
     .toArray();
 
-  const importIds = new Set();
+  const displayIdHexes = new Set();
+  const importKioskIds = new Set();
 
   for (const booking of bookings) {
-    const displayId = booking.display ? String(booking.display) : "";
-    if (!displayId) continue;
+    const displayHex = booking.display ? String(booking.display).trim().toLowerCase() : "";
+    if (!displayHex) continue;
+
+    displayIdHexes.add(displayHex);
 
     const display = await db
       .collection(MONGO_DISPLAYS_COLLECTION)
-      .findOne({ _id: new ObjectId(displayId) }, { projection: { kiosk: 1 } });
+      .findOne({ _id: new ObjectId(displayHex) }, { projection: { kiosk: 1 } });
 
     const kioskImportId = display?.kiosk ? String(display.kiosk).trim() : "";
-    if (kioskImportId) importIds.add(kioskImportId);
+    if (kioskImportId) importKioskIds.add(kioskImportId);
   }
 
-  return [...importIds];
+  const displayObjectIds = [...displayIdHexes].map((hex) => new ObjectId(hex));
+  return {
+    displayObjectIds,
+    displayIdHexes: [...displayIdHexes],
+    importKioskIds: [...importKioskIds],
+  };
 }
 
 /**
- * Resolve displayimages for kiosks on this campaign only.
+ * displayimages for this campaign only — match displayimages.display to campaign bookings.
  */
 async function fetchDisplayImagesForCampaign(db, mongoCampaignIdHex) {
-  const importKioskIds = await collectImportKioskIdsForCampaign(db, mongoCampaignIdHex);
-  if (!importKioskIds.length) {
-    return { importKioskIds: [], kioskDocs: [], displayImages: [] };
-  }
+  const { displayObjectIds, displayIdHexes, importKioskIds } =
+    await collectCampaignBookingContext(db, mongoCampaignIdHex);
 
-  const kioskDocs = await db
-    .collection(MONGO_KIOSKS_COLLECTION)
-    .find({ import_kiosk_id: { $in: importKioskIds } })
-    .project({ _id: 1, import_kiosk_id: 1 })
-    .toArray();
-
-  const kioskObjectIds = kioskDocs.map((d) => d._id);
-  if (!kioskObjectIds.length) {
-    return { importKioskIds, kioskDocs, displayImages: [] };
+  if (!displayObjectIds.length) {
+    return {
+      importKioskIds,
+      displayIdHexes,
+      displayImages: [],
+    };
   }
 
   const displayImages = await db
     .collection(MONGO_DISPLAY_IMAGES_COLLECTION)
     .find({
-      kiosk: { $in: kioskObjectIds },
+      $or: [
+        { display: { $in: displayObjectIds } },
+        { display: { $in: displayIdHexes } },
+      ],
       image_url: { $exists: true, $ne: null, $ne: "" },
     })
     .sort({ created: 1 })
     .toArray();
 
-  return { importKioskIds, kioskDocs, displayImages };
+  return { importKioskIds, displayIdHexes, displayImages };
 }
 
 async function createContainerClient(azureConfig) {
@@ -382,7 +391,7 @@ export async function migrateCampaignDisplayImagesToAzure(
   const stats = {
     ...createEmptyStats(),
     importKioskIdsFound: 0,
-    kiosksMatched: 0,
+    campaignDisplaysFound: 0,
     displayImagesFound: 0,
     installedImageUrlUpdated: 0,
     installedImageUrlDryRunWouldUpdate: 0,
@@ -412,16 +421,16 @@ export async function migrateCampaignDisplayImagesToAzure(
     await mongoClient.connect();
     const db = mongoClient.db(mongoConfig.dbName);
 
-    const { importKioskIds, kioskDocs, displayImages } =
+    const { importKioskIds, displayIdHexes, displayImages } =
       await fetchDisplayImagesForCampaign(db, mongoCampaignIdHex);
 
     stats.importKioskIdsFound = importKioskIds.length;
-    stats.kiosksMatched = kioskDocs.length;
+    stats.campaignDisplaysFound = displayIdHexes.length;
     stats.displayImagesFound = displayImages.length;
 
     if (verbose) {
       console.log(
-        `  [images] ImportKioskIDs=${importKioskIds.length} kiosks=${kioskDocs.length} displayimages=${displayImages.length}`
+        `  [images] displays=${displayIdHexes.length} importKioskIDs=${importKioskIds.length} displayimages=${displayImages.length}`
       );
       if (importKioskIds.length && verbose) {
         console.log(`  [images] ImportKioskIDs: ${importKioskIds.join(", ")}`);
