@@ -1,1 +1,6 @@
 node_modules/
+fetch-display-images-by-campaign/fetch-config.js
+fetch-display-images-by-campaign/fetch-config.local.js
+fetch-display-images-by-campaign/display_images_by_campaign.csv
+fetch-display-images-by-campaign/fetch_summary.csv
+fetch-display-images-by-campaign/fetch_errors.log

@@ -26,7 +26,12 @@
     "populate:installed-image-url": "node populate-installed-image-url/populate-installed-image-url.js",
     "populate:installed-image-url:dry-run": "node populate-installed-image-url/populate-installed-image-url.js --dry-run",
     "populate:installed-image-url:dry-run:limit1": "node populate-installed-image-url/populate-installed-image-url.js --dry-run --limit 1",
-    "populate:installed-image-url:dry-run:limit5": "node populate-installed-image-url/populate-installed-image-url.js --dry-run --limit 5"
+    "populate:installed-image-url:dry-run:limit5": "node populate-installed-image-url/populate-installed-image-url.js --dry-run --limit 5",
+
+    "fetch:display-images-by-campaign": "node fetch-display-images-by-campaign/fetch-display-images-by-campaign.js",
+    "fetch:display-images-by-campaign:dry-run:limit1": "node fetch-display-images-by-campaign/fetch-display-images-by-campaign.js --dry-run --limit 1",
+    "fetch:display-images-by-campaign:limit1": "node fetch-display-images-by-campaign/fetch-display-images-by-campaign.js --limit 1",
+    "fetch:display-images-by-campaign:dry-run:limit5": "node fetch-display-images-by-campaign/fetch-display-images-by-campaign.js --dry-run --limit 5"
   },
   "dependencies": {
     "@azure/storage-blob": "^12.28.0",
