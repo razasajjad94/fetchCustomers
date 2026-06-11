@@ -11,6 +11,12 @@
  *      {blobPrefix}/{sqlCampaignId}/{import_kiosk_id}/{filename}
  *   5. UPDATE CampaignKiosks.InstalledImageUrl = blob_url
  *      WHERE CampaignID = sqlCampaignId AND KioskID = Kiosks.ID (ImportKioskID)
+ *      A kiosk can have MANY displayimages (one per display face / re-install).
+ *      Only the LATEST image per kiosk (by mongo `updated`, fallback `created`)
+ *      sets InstalledImageUrl — and it overwrites an existing value, so each
+ *      CampaignKiosks row always ends up with the most recent install photo.
+ *      All images are still uploaded to blob storage; older ones just don't
+ *      touch InstalledImageUrl (status: skipped-not-latest).
  *
  * Results per campaign:
  *   display-images-blob-migration/campaign-runs/{sqlCampaignId}/migration_results.csv
@@ -78,7 +84,12 @@ function campaignOutputPaths(sqlCampaignId) {
  */
 async function collectCampaignBookingContext(db, mongoCampaignIdHex) {
   if (!mongoCampaignIdHex) {
-    return { displayObjectIds: [], displayIdHexes: [], importKioskIds: [] };
+    return {
+      displayObjectIds: [],
+      displayIdHexes: [],
+      importKioskIds: [],
+      displayKioskMap: new Map(),
+    };
   }
 
   const campaignOid = new ObjectId(mongoCampaignIdHex);
@@ -92,6 +103,7 @@ async function collectCampaignBookingContext(db, mongoCampaignIdHex) {
 
   const displayIdHexes = new Set();
   const importKioskIds = new Set();
+  const displayKioskMap = new Map(); // display hex → ImportKioskID string
 
   for (const booking of bookings) {
     const displayHex = booking.display ? String(booking.display).trim().toLowerCase() : "";
@@ -104,7 +116,10 @@ async function collectCampaignBookingContext(db, mongoCampaignIdHex) {
       .findOne({ _id: new ObjectId(displayHex) }, { projection: { kiosk: 1 } });
 
     const kioskImportId = display?.kiosk ? String(display.kiosk).trim() : "";
-    if (kioskImportId) importKioskIds.add(kioskImportId);
+    if (kioskImportId) {
+      importKioskIds.add(kioskImportId);
+      displayKioskMap.set(displayHex, kioskImportId);
+    }
   }
 
   const displayObjectIds = [...displayIdHexes].map((hex) => new ObjectId(hex));
@@ -112,6 +127,7 @@ async function collectCampaignBookingContext(db, mongoCampaignIdHex) {
     displayObjectIds,
     displayIdHexes: [...displayIdHexes],
     importKioskIds: [...importKioskIds],
+    displayKioskMap,
   };
 }
 
@@ -119,7 +135,7 @@ async function collectCampaignBookingContext(db, mongoCampaignIdHex) {
  * displayimages for this campaign only — match displayimages.display to campaign bookings.
  */
 async function fetchDisplayImagesForCampaign(db, mongoCampaignIdHex) {
-  const { displayObjectIds, displayIdHexes, importKioskIds } =
+  const { displayObjectIds, displayIdHexes, importKioskIds, displayKioskMap } =
     await collectCampaignBookingContext(db, mongoCampaignIdHex);
 
   if (!displayObjectIds.length) {
@@ -127,6 +143,7 @@ async function fetchDisplayImagesForCampaign(db, mongoCampaignIdHex) {
       importKioskIds,
       displayIdHexes,
       displayImages: [],
+      displayKioskMap,
     };
   }
 
@@ -142,7 +159,32 @@ async function fetchDisplayImagesForCampaign(db, mongoCampaignIdHex) {
     .sort({ created: 1 })
     .toArray();
 
-  return { importKioskIds, displayIdHexes, displayImages };
+  return { importKioskIds, displayIdHexes, displayImages, displayKioskMap };
+}
+
+/**
+ * Pick the LATEST displayimage per kiosk (by mongo `updated`, fallback `created`).
+ * Returns a Set of displayimage _id strings that should set InstalledImageUrl.
+ * Ties resolve to the later doc in the (created-ascending) list.
+ */
+function pickLatestImageIdsPerKiosk(displayImages, displayKioskMap) {
+  const latestByKiosk = new Map(); // ImportKioskID → { id, ts }
+
+  for (const doc of displayImages) {
+    const displayHex = doc.display ? String(doc.display).trim().toLowerCase() : "";
+    const importKioskId = displayKioskMap.get(displayHex);
+    if (!importKioskId) continue;
+
+    const raw = doc.updated ?? doc.created;
+    const ts = raw ? new Date(raw).getTime() || 0 : 0;
+
+    const current = latestByKiosk.get(importKioskId);
+    if (!current || ts >= current.ts) {
+      latestByKiosk.set(importKioskId, { id: String(doc._id), ts });
+    }
+  }
+
+  return new Set([...latestByKiosk.values()].map((v) => v.id));
 }
 
 async function createContainerClient(azureConfig) {
@@ -209,10 +251,12 @@ function hasUsableBlobUrl(blobUrl) {
 
 /**
  * After blob upload, set CampaignKiosks.InstalledImageUrl for this campaign + kiosk.
+ * Only the LATEST image per kiosk (options.isLatestForKiosk) writes the URL,
+ * and it OVERWRITES any existing value so re-runs converge to the latest photo.
  */
 async function applyInstalledImageUrlForRow(pool, sqlCampaignId, imageRow, options) {
   const dryRun = options.dryRun === true;
-  const skipExistingInstalledUrl = options.skipExistingInstalledUrl !== false;
+  const isLatestForKiosk = options.isLatestForKiosk === true;
   const verbose = options.verbose === true;
   const stats = options.stats;
 
@@ -223,6 +267,12 @@ async function applyInstalledImageUrlForRow(pool, sqlCampaignId, imageRow, optio
     installedImageUrlStatus: "",
     installedImageUrlError: "",
   };
+
+  if (!isLatestForKiosk) {
+    extended.installedImageUrlStatus = "skipped-not-latest";
+    if (stats) stats.installedImageUrlSkippedNotLatest++;
+    return extended;
+  }
 
   if (!hasUsableBlobUrl(imageRow.blobUrl)) {
     extended.installedImageUrlStatus =
@@ -275,11 +325,12 @@ async function applyInstalledImageUrlForRow(pool, sqlCampaignId, imageRow, optio
     for (const ck of campaignKiosks) {
       const previous = ck.InstalledImageUrl ? String(ck.InstalledImageUrl).trim() : "";
 
-      if (skipExistingInstalledUrl && previous) {
+      // Idempotent re-run: already pointing at this exact blob — nothing to do
+      if (previous === blobUrl) {
         if (stats) stats.installedImageUrlSkippedExisting++;
         if (verbose) {
           console.log(
-            `  [installed-url] skip CampaignKiosks.ID=${ck.ID} (already set)`
+            `  [installed-url] skip CampaignKiosks.ID=${ck.ID} (already latest)`
           );
         }
         continue;
@@ -374,7 +425,7 @@ function writeCampaignImageResultsCsv(filePath, rows) {
  *
  * @param {string} mongoCampaignIdHex
  * @param {number} sqlCampaignId - SQL Campaign.ID (folder segment in blob path)
- * @param {{ dryRun?: boolean, skipExisting?: boolean, skipExistingInstalledUrl?: boolean, verbose?: boolean, pool?: object }} options
+ * @param {{ dryRun?: boolean, skipExisting?: boolean, verbose?: boolean, pool?: object }} options
  */
 export async function migrateCampaignDisplayImagesToAzure(
   mongoCampaignIdHex,
@@ -383,7 +434,6 @@ export async function migrateCampaignDisplayImagesToAzure(
 ) {
   const dryRun = options.dryRun === true;
   const skipExisting = options.skipExisting !== false;
-  const skipExistingInstalledUrl = options.skipExistingInstalledUrl !== false;
   const verbose = options.verbose !== false;
   const pool = options.pool ?? null;
   const azureConfig = AZURE_BLOB_CONFIG;
@@ -396,6 +446,7 @@ export async function migrateCampaignDisplayImagesToAzure(
     installedImageUrlUpdated: 0,
     installedImageUrlDryRunWouldUpdate: 0,
     installedImageUrlSkippedExisting: 0,
+    installedImageUrlSkippedNotLatest: 0,
     installedImageUrlSkippedNoKiosk: 0,
     installedImageUrlSkippedNoCampaignKiosk: 0,
     installedImageUrlFailed: 0,
@@ -421,12 +472,15 @@ export async function migrateCampaignDisplayImagesToAzure(
     await mongoClient.connect();
     const db = mongoClient.db(mongoConfig.dbName);
 
-    const { importKioskIds, displayIdHexes, displayImages } =
+    const { importKioskIds, displayIdHexes, displayImages, displayKioskMap } =
       await fetchDisplayImagesForCampaign(db, mongoCampaignIdHex);
 
     stats.importKioskIdsFound = importKioskIds.length;
     stats.campaignDisplaysFound = displayIdHexes.length;
     stats.displayImagesFound = displayImages.length;
+
+    // Latest displayimage per kiosk decides InstalledImageUrl
+    const latestImageIds = pickLatestImageIdsPerKiosk(displayImages, displayKioskMap);
 
     if (verbose) {
       console.log(
@@ -475,9 +529,9 @@ export async function migrateCampaignDisplayImagesToAzure(
       const imageRow = await processDisplayImageDoc(doc, context);
       const row = await applyInstalledImageUrlForRow(pool, sqlCampaignId, imageRow, {
         dryRun,
-        skipExistingInstalledUrl,
         verbose,
         stats,
+        isLatestForKiosk: latestImageIds.has(String(doc._id)),
       });
       resultRows.push(row);
     }

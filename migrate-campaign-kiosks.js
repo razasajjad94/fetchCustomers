@@ -18,7 +18,10 @@
  *   - Existing Venues are REUSED (never updated)
  *   - Existing Kiosks are REUSED (never updated)
  *   - Only INSERT new rows when ImportVenueID / ImportKioskID not found
- *   - CampaignKiosks always INSERT (new link per booking)
+ *   - CampaignKiosks: one INSERT per unique (CampaignID, KioskID, ReservationStart,
+ *     ReservationEnd). Mongo books one display FACE per booking and many faces share one
+ *     kiosk string (e.g. import_display_id 22382C1..22382C17 → kiosk "22382C"), so several
+ *     bookings can resolve to the same SQL KioskID — duplicates are skipped, not inserted.
  *
  * ASSUMPTIONS:
  *   - Pricing fields (ContractPrice, EvergreenPrice) mapped from mongo booking if available,
@@ -196,6 +199,31 @@ async function findSqlVenueByImportId(pool, importVenueId) {
 
   if (!result.recordset.length) return null;
   return { id: result.recordset[0].ID };
+}
+
+/**
+ * Check if a CampaignKiosks link already exists for the same
+ * (CampaignID, KioskID, ReservationStart, ReservationEnd).
+ * Guards against duplicates within one run (multiple Mongo display faces sharing
+ * one kiosk string) and across re-runs of the migration.
+ */
+async function campaignKioskLinkExists(pool, row) {
+  const request = pool.request();
+  request.input("campaignID", sql.Int, row.CampaignID);
+  request.input("kioskID", sql.Int, row.KioskID);
+  request.input("reservationStart", sql.Date, row.ReservationStart);
+  request.input("reservationEnd", sql.Date, row.ReservationEnd);
+
+  const result = await request.query(`
+    SELECT TOP 1 ID
+    FROM ${SQL_CAMPAIGN_KIOSKS_TABLE}
+    WHERE CampaignID = @campaignID
+      AND KioskID = @kioskID
+      AND ((ReservationStart = @reservationStart) OR (ReservationStart IS NULL AND @reservationStart IS NULL))
+      AND ((ReservationEnd = @reservationEnd) OR (ReservationEnd IS NULL AND @reservationEnd IS NULL))
+  `);
+
+  return result.recordset.length > 0;
 }
 
 // =============================================================================
@@ -427,8 +455,12 @@ export async function migrateCampaignKiosks(pool, mongoCampaignIdHex, sqlCampaig
     kiosksCreated: 0,
     kiosksReused: 0,
     campaignKiosksCreated: 0,
+    campaignKiosksSkippedDuplicates: 0,
     errors: [],
   };
+
+  // Unique (kiosk, reservation window) links already handled in this run
+  const seenLinks = new Set();
 
   try {
     // 1. Load bookings from Mongo
@@ -546,8 +578,24 @@ export async function migrateCampaignKiosks(pool, mongoCampaignIdHex, sqlCampaig
         }
       }
 
-      // 8. INSERT NEW CampaignKiosks link (always new, never update)
+      // 8. INSERT CampaignKiosks link — one per unique (kiosk, reservation window).
+      // Multiple bookings (display faces) sharing one kiosk string collapse into one link.
+      const startKey = toDate(booking.booking_start_date)?.toISOString().slice(0, 10) ?? "null";
+      const endKey = toDate(booking.booking_end_date)?.toISOString().slice(0, 10) ?? "null";
+      const linkKey = `${display.kiosk}|${startKey}|${endKey}`;
+
+      if (seenLinks.has(linkKey)) {
+        stats.campaignKiosksSkippedDuplicates++;
+        if (verbose) {
+          console.log(
+            `    Skipped duplicate CampaignKiosk (same kiosk+window in this run): Campaign ${sqlCampaignId} ↔ Kiosk ${sqlKiosk.id} (ImportKioskID ${display.kiosk}, ${startKey} → ${endKey})`
+          );
+        }
+        continue;
+      }
+
       if (dryRun) {
+        seenLinks.add(linkKey);
         stats.campaignKiosksCreated++;
         if (verbose) {
           console.log(
@@ -557,7 +605,21 @@ export async function migrateCampaignKiosks(pool, mongoCampaignIdHex, sqlCampaig
       } else {
         try {
           const campaignKioskRow = mapBookingToCampaignKiosk(booking, sqlCampaignId, sqlKiosk.id);
+
+          // Re-run safety: skip if this exact link already exists in SQL
+          if (await campaignKioskLinkExists(pool, campaignKioskRow)) {
+            seenLinks.add(linkKey);
+            stats.campaignKiosksSkippedDuplicates++;
+            if (verbose) {
+              console.log(
+                `    Skipped existing CampaignKiosk (already in SQL): Campaign ${sqlCampaignId} ↔ Kiosk ${sqlKiosk.id} (ImportKioskID ${display.kiosk}, ${startKey} → ${endKey})`
+              );
+            }
+            continue;
+          }
+
           await insertCampaignKioskRow(pool, campaignKioskRow);
+          seenLinks.add(linkKey);
           stats.campaignKiosksCreated++;
           if (verbose) {
             console.log(

@@ -151,7 +151,7 @@ function logKioskIssues(logPrefix, mongoCampaignId, sqlCampaignId, kioskStats) {
   }
 
   console.log(
-    `${logPrefix}  [kiosks] bookings=${bookings} linked=${linked} created=${kioskStats.kiosksCreated ?? 0} reused=${kioskStats.kiosksReused ?? 0} venues+${kioskStats.venuesCreated ?? 0} venues↺${kioskStats.venuesReused ?? 0}`
+    `${logPrefix}  [kiosks] bookings=${bookings} linked=${linked} dup-skipped=${kioskStats.campaignKiosksSkippedDuplicates ?? 0} created=${kioskStats.kiosksCreated ?? 0} reused=${kioskStats.kiosksReused ?? 0} venues+${kioskStats.venuesCreated ?? 0} venues↺${kioskStats.venuesReused ?? 0}`
   );
 
   if (errs.length === 0) return;
@@ -258,6 +258,7 @@ function formatBulkResultLine(result) {
     (b.errors && b.errors.length ? b.errors.join(" || ") : ""),
     k.bookingsProcessed ?? "",
     k.campaignKiosksCreated ?? "",
+    k.campaignKiosksSkippedDuplicates ?? "",
     k.kiosksCreated ?? "",
     k.kiosksReused ?? "",
     k.venuesCreated ?? "",
@@ -316,6 +317,7 @@ function aggregateBulkStats(results, dryRun) {
     wouldCreateLogin: 0,
     bookingsProcessed: 0,
     campaignKiosksCreated: 0,
+    campaignKiosksSkippedDuplicates: 0,
     kiosksCreated: 0,
     kiosksReused: 0,
     venuesCreated: 0,
@@ -426,6 +428,7 @@ function aggregateBulkStats(results, dryRun) {
     if (k) {
       stats.bookingsProcessed += k.bookingsProcessed || 0;
       stats.campaignKiosksCreated += k.campaignKiosksCreated || 0;
+      stats.campaignKiosksSkippedDuplicates += k.campaignKiosksSkippedDuplicates || 0;
       stats.kiosksCreated += k.kiosksCreated || 0;
       stats.kiosksReused += k.kiosksReused || 0;
       stats.venuesCreated += k.venuesCreated || 0;
@@ -509,6 +512,7 @@ function printBulkStatsReport(stats, dryRun, outputPath) {
   console.log(`\n[Kiosk Migration]`);
   console.log(`  Bookings processed:       ${stats.bookingsProcessed}`);
   console.log(`  CampaignKiosks ${dryRun ? 'would be' : ''} linked:     ${stats.campaignKiosksCreated}`);
+  console.log(`  Duplicate links skipped:  ${stats.campaignKiosksSkippedDuplicates}`);
   console.log(`  Kiosks created:           ${stats.kiosksCreated}`);
   console.log(`  Kiosks reused:            ${stats.kiosksReused}`);
   console.log(`  Venues created:           ${stats.venuesCreated}`);
@@ -902,6 +906,7 @@ async function main() {
       "billing_error_messages",
       "bookings_processed",
       "campaign_kiosks_created",
+      "campaign_kiosks_skipped_duplicates",
       "kiosks_created",
       "kiosks_reused",
       "venues_created",
